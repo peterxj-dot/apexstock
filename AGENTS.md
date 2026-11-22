@@ -46,6 +46,9 @@
 - **`F1_TP3h`（SOXL 极致大周期版，5 战 100% 全胜）**：
   - **入场前置门控 (`F1`)**：在 `pre_c7_vol` 上叠加慢跌时间或快跌深度条件 **`(距52周高点周数 wks_52H ≥ 30) 或 (近8周最低点相对52周高点跌幅 ≤ -80%)`**，精准剔除 `2022-05-31` 半山腰假底（5 个真大底零影响；注：仅适用于高波动 SOXL，跨标的应用于 TQQQ 会误杀 `2019`/`2020`/`2025` 真底）
   - **止盈出口**：同 `TP3h`（稳健高原：`hold = 45~55w × 乖离 = 30%~50%` 全部 15 组均达 `$6,184万~$1.216亿`、`MaxDD -48.99%`）
+- **`C2_F1_or_MFishLin + TP3h`（SOXL 防踏空双保险旗舰版）**：
+  - **主入口 (`F1`) + 月线金叉兜底 (`MFishLin`)**：空仓时优先由严格 `F1` 左侧狙击大底；若某轮牛市未能凑齐 `F1` 条件，则在**已完成月线 `M_Fish(10) < 0.8` 上穿 `M_Fish_Sig`** 时自动触发兜底买入（不设 `30周/-80%` 限制，消除“差 1 周或少 3% 放量就踏空整轮牛市”的风险）
+  - **表现与鲁棒性**：`SOXL 2015–2026` `$90,489,657.17`（`CAGR 115.56%`, `MaxDD -48.99%`, `Calmar 2.359`, `5` 战 `100%`）；**`SOXL 2011–2026`（15.5 年全历史）`$166,044,243.09`（`CAGR 87.61%`, `MaxDD -48.99%`, `Calmar 1.788`, `7` 笔/`85.7%` 胜率）**；**50 个虚拟平行宇宙 (`2015–2026`)**：大底捕获率 **`65.9%`**（vs 纯 `F1` `24.6%`）、**`0` 个宇宙踏空**（vs 纯 `F1` `5/50`）、中位终值 **`$465,579`**（vs 纯 `F1` `$56,843`，提升 `8.2` 倍）
 
 ### 策略 4：`H5_E2_Promote_S1_AdaptHV`（全天候双引擎旗舰版）
 - **大底早进并无缝晋升 (`BOT -> TREND`)**：空仓时满足 `pre_c7_vol & 周收盘 > prev_W_High` 次日开盘全仓建底仓 `BOT`，建底初期仅受 `SL_W25` 保护（忽略 `HV20` 波动率刹车）；一旦 `SMH Close > SMH 200日SMA × 1.01` 且未触发自适应波动率刹车，**不卖出直接无缝晋升**为 `TREND`
@@ -94,5 +97,5 @@
 - **无未来函数审计**：对 2015–2026 年全部入场信号日（策略 1 共 `35` 笔、策略 2 共 `42` 笔、策略 3 共 `6` 笔、`F0_TP3h` 共 `6` 笔、`F1_TP3h` 共 `5` 笔、策略 4 共 `32` 笔）做严格因果校验，月线/周线均按各周期实际最后交易日聚合再 `ffill`，非周五 `ALT` 触发 `0`、同日买卖 `0`、次日 `Open` 成交价误差 `0`。
 - **参数稳健性与跨标的注意**：`F1_TP3h` 在 `hold=45~55w × str=30%~50%` 邻域内全部 15 组均达 `$6,184万~$1.216亿`（`Calmar 2.220~2.470`）；其中 **`TP3h` 主动止盈** 在 `F0` 下对 `SOXL` 与 `TQQQ` 均大幅领先，而 **`F1`（`wks_52H≥30 | dd52_8wL%≤-80%`）** 为高波动 `SOXL` 专属防假底门控，不可直接套用于低波指数 ETF。
 - **去分红调整原始价 (`Raw Close`, 2015–2025)**：策略 1 `$11,033,764.37`（`CAGR 89.33%`, `MaxDD -54.20%`, `34` 笔）；策略 2 `$13,437,825.20`（`CAGR 92.76%`, `MaxDD -53.22%`, `39` 笔）。
-- **验证脚本与图表生成入口**：[validate_oos_and_tqqq.py](tmp/validate_oos_and_tqqq.py)、[scan_exit_conditioned_reentry.py](tmp/scan_exit_conditioned_reentry.py)、[test_cycle_v2_and_hybrid.py](tmp/test_cycle_v2_and_hybrid.py)、[test_bottom_filter_and_tp_exits.py](tmp/test_bottom_filter_and_tp_exits.py)、[build_soxl_zones.py](tools/build_soxl_zones.py)。
+- **验证脚本与图表生成入口**：[validate_oos_and_tqqq.py](tmp/validate_oos_and_tqqq.py)、[scan_exit_conditioned_reentry.py](tmp/scan_exit_conditioned_reentry.py)、[test_cycle_v2_and_hybrid.py](tmp/test_cycle_v2_and_hybrid.py)、[test_bottom_filter_and_tp_exits.py](tmp/test_bottom_filter_and_tp_exits.py)、[improve_tp3h_and_robustness.py](tmp/improve_tp3h_and_robustness.py)、[simulate_synthetic_soxl.py](tmp/simulate_synthetic_soxl.py)、[audit_f1_missed_bottoms.py](tmp/audit_f1_missed_bottoms.py)、[study_r3_r4_hybrids.py](tmp/study_r3_r4_hybrids.py)、[sweep_volume_gate.py](tmp/sweep_volume_gate.py)、[build_soxl_zones.py](tools/build_soxl_zones.py)。
 - **参数适用注意**：`HV20 > 115%` 阈值是针对高波动 `SOXL` 标定；跨标的应用于低波 ETF（如 `TQQQ`）时，日常震荡不一定触发 115% 波动率刹车，此时策略 2 的 `30%` 追踪止损提供了额外回撤保护。

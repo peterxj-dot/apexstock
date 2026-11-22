@@ -134,9 +134,17 @@ def build_causal_features(df_soxl: pd.DataFrame, df_smh: pd.DataFrame) -> dict:
     m = _agg_periodic(daily, "ME")
     mf = fisher_transform(m["High"], m["Low"], period=10)
     m_fish = mf["fisher"]
+    m_sig = mf["fisher_signal"]
+    m_cross_up = (m_fish > m_sig) & (m_fish.shift(1) <= m_sig.shift(1)) & (m_fish.shift(1) < 0.8)
 
     w["M_Fish_prev"] = m_fish.reindex(w.index, method="ffill")
     daily["M_Fish_prev_ffill"] = m_fish.reindex(daily.index, method="ffill")
+
+    w["MF_Lin_Buy"] = False
+    for mdt in m.index[m_cross_up.fillna(False)]:
+        w_pos = int(w.index.searchsorted(mdt, side="left"))
+        if w_pos < len(w):
+            w.iloc[w_pos, w.columns.get_loc("MF_Lin_Buy")] = True
 
     min_low_200_8w = (1.0 + w["Low_vs_200W%"] / 100.0).rolling(8, min_periods=1).min()
     min_wf_4w = w["W_Fisher"].rolling(4, min_periods=1).min()
@@ -150,6 +158,7 @@ def build_causal_features(df_soxl: pd.DataFrame, df_smh: pd.DataFrame) -> dict:
         & ((w["wks_52H"] >= 30) | (w["dd52_8wL%"] <= -80.0))
         & (w["Close"] > w["High"].shift(1))
     )
+    w["C2_F1_or_MFishLin"] = w["F1_E2_PrevHigh"] | w["MF_Lin_Buy"]
     w["ALT_Buy_S1"] = (w["W_Fisher"] < -1.8) & ((w["dW_Fish"] > 0) | (w["W_Vol_R"] > 1.3))
 
     daily_pos_map = {dt: pos for pos, dt in enumerate(daily.index)}
@@ -636,6 +645,9 @@ def simulate_tp3h(
     use_f1_filter: bool = True,
     start_date: str = BT_START,
     end_date: str = BT_END,
+    entry_col_override: str | None = None,
+    mode_tag_override: str | None = None,
+    strategy_id: str | None = None,
 ) -> dict:
     """Simulate upgraded Strategy 3 with proactive high-zone TP3h (with or without F1 SOXL anti-fake-bottom filter)."""
     daily_df = feats["daily"]
@@ -647,8 +659,8 @@ def simulate_tp3h(
     i_start, i_end = int(bt_positions[0]), int(bt_positions[-1])
     n_bt = i_end - i_start + 1
 
-    entry_col = "F1_E2_PrevHigh" if use_f1_filter else "E2_PrevHigh"
-    mode_tag = "BOT_F1" if use_f1_filter else "BOT_E2"
+    entry_col = entry_col_override or ("F1_E2_PrevHigh" if use_f1_filter else "E2_PrevHigh")
+    mode_tag = mode_tag_override or ("BOT_F1" if use_f1_filter else "BOT_E2")
     opens = daily_df["Open"].to_numpy(dtype=np.float64)
     closes = daily_df["Close"].to_numpy(dtype=np.float64)
 
@@ -792,6 +804,15 @@ def simulate_tp3h(
         )
 
     stats = _compute_stats(equity, trades, days_invested, idx[i_start : i_end + 1])
+    if strategy_id == "C2_F1_or_MFishLin_TP3h":
+        return {
+            "id": "C2_F1_or_MFishLin_TP3h",
+            "name": "SOXL 防踏空双保险旗舰: C2 (F1+月Fisher金叉兜底)+TP3h (15.5年$1.66亿 / 12年$9049万)",
+            "short_label": "SOXL防踏空旗舰 (C2+TP3h)",
+            "rule_desc": "主入口F1(200W+放量1.6x+30w|-80%+PrevHigh) 或 月线M_Fish<0.8金叉兜底 | 45w&M_Fish≥2&30W≥40%周Fisher死叉止盈 (X1a兜底)",
+            "stats": stats,
+            "trades": trades,
+        }
     if use_f1_filter:
         return {
             "id": "F1_TP3h",
@@ -1065,7 +1086,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div class="group">
       <span class="group-label">策略标注</span>
       <select id="strategySelect" class="strategy-select">
-        <option value="F1_TP3h" selected>SOXL极致大周期: F1+TP3h (5笔全胜, 12年$9049万, 回撤-49.0%)</option>
+        <option value="C2_F1_or_MFishLin_TP3h" selected>SOXL防踏空旗舰: C2 (F1+月Fisher兜底)+TP3h (12年$9049万 / 15.5年$1.66亿, 0踏空)</option>
+        <option value="F1_TP3h">SOXL极致大周期: F1+TP3h (5笔全胜, 12年$9049万, 回撤-49.0%)</option>
         <option value="F0_TP3h">通用大周期止盈: F0+TP3h (6笔, 12年$6088万, 回撤-50.3%)</option>
         <option value="D1_X1a_WTSL35">策略3 极简大周期: D1_X1a_WTSL35 (6笔, 12年$3804万)</option>
         <option value="D1_X1a_WTSL35_Split50">策略3 分批建仓版: D1_X1a_WTSL35_Split50 (6笔, 12年$3012万, 回撤-54.4%)</option>
@@ -1666,6 +1688,22 @@ def main() -> None:
     c7_entries = detect_c7_vol_entries(df_soxl)
 
     feats = build_causal_features(df_soxl, df_smh)
+    c2_tp3h = simulate_tp3h(
+        feats,
+        use_f1_filter=True,
+        entry_col_override="C2_F1_or_MFishLin",
+        mode_tag_override="BOT_C2",
+        strategy_id="C2_F1_or_MFishLin_TP3h",
+    )
+    c2_15yr = simulate_tp3h(
+        feats,
+        use_f1_filter=True,
+        start_date="2011-06-01",
+        end_date=BT_END,
+        entry_col_override="C2_F1_or_MFishLin",
+        mode_tag_override="BOT_C2",
+        strategy_id="C2_F1_or_MFishLin_TP3h",
+    )
     f1_tp3h = simulate_tp3h(feats, use_f1_filter=True)
     f0_tp3h = simulate_tp3h(feats, use_f1_filter=False)
     d1_full = simulate_d1_x1a_wtsl35(feats, use_split_50_50=False)
@@ -1673,6 +1711,8 @@ def main() -> None:
     h5 = simulate_h5_adapt_hv(feats)
 
     assert len(c7_entries) == 5, f"Expected 5 C7_Vol entries, got {len(c7_entries)}"
+    assert c2_tp3h["stats"]["trades"] == 5 and abs(c2_tp3h["stats"]["final"] - 90489657.17) < 1.0, c2_tp3h["stats"]
+    assert c2_15yr["stats"]["trades"] == 7 and abs(c2_15yr["stats"]["final"] - 166044243.09) < 1.0, c2_15yr["stats"]
     assert f1_tp3h["stats"]["trades"] == 5 and abs(f1_tp3h["stats"]["final"] - 90489657.17) < 1.0 and f1_tp3h["stats"]["win_rate"] == 100.0, f1_tp3h["stats"]
     assert f0_tp3h["stats"]["trades"] == 6 and abs(f0_tp3h["stats"]["final"] - 60877424.74) < 1.0 and f0_tp3h["stats"]["win_rate"] == 83.3, f0_tp3h["stats"]
     assert d1_full["stats"]["trades"] == 6 and abs(d1_full["stats"]["final"] - 38035375.82) < 1.0, d1_full["stats"]
@@ -1680,6 +1720,7 @@ def main() -> None:
     assert h5["stats"]["trades"] == 32 and abs(h5["stats"]["final"] - 37913860.48) < 1.0, h5["stats"]
 
     strategies = {
+        "C2_F1_or_MFishLin_TP3h": c2_tp3h,
         "F1_TP3h": f1_tp3h,
         "F0_TP3h": f0_tp3h,
         "D1_X1a_WTSL35": d1_full,
