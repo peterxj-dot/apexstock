@@ -1,0 +1,10 @@
+{
+  "start_date": "2010-01-01",
+  "data_dir": "../data",
+  "tickers": [
+    "QQQ",
+    "TQQQ",
+    "SMH",
+    "SOXL"
+  ]
+}
