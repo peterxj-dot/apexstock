@@ -759,7 +759,7 @@ def simulate_tp3h(
                 pending_reason = "SL_W25%"
             elif pos > entry_fill_pos:
                 hold_weeks = w_pos - entry_sig_w_pos
-                if hold_weeks >= 45 and pd.notna(mf) and float(mf) >= 2.0 and pd.notna(vs30) and float(vs30) >= 40.0:
+                if hold_weeks >= 50 and pd.notna(mf) and float(mf) >= 2.0 and pd.notna(vs30) and float(vs30) >= 40.0:
                     high_zone_armed = True
                 if (
                     high_zone_armed
@@ -807,9 +807,9 @@ def simulate_tp3h(
     if strategy_id == "C2_F1_or_MFishLin_TP3h":
         return {
             "id": "C2_F1_or_MFishLin_TP3h",
-            "name": "SOXL 防踏空双保险旗舰: C2 (F1+月Fisher金叉兜底)+TP3h (15.5年$1.66亿 / 12年$9049万)",
+            "name": "SOXL 防踏空双保险旗舰: C2 (F1+月Fisher金叉兜底)+TP3h (15.5年$1.82亿 / 12年$9931万)",
             "short_label": "SOXL防踏空旗舰 (C2+TP3h)",
-            "rule_desc": "主入口F1(200W+放量1.6x+30w|-80%+PrevHigh) 或 月线M_Fish<0.8金叉兜底 | 45w&M_Fish≥2&30W≥40%周Fisher死叉止盈 (X1a兜底)",
+            "rule_desc": "主入口F1(200W+放量1.6x+30w|-80%+PrevHigh) 或 月线M_Fish<0.8金叉兜底 | 50w&M_Fish≥2&30W≥40%周Fisher死叉止盈 (X1a兜底)",
             "stats": stats,
             "trades": trades,
         }
@@ -818,7 +818,7 @@ def simulate_tp3h(
             "id": "F1_TP3h",
             "name": "SOXL 极致大周期止盈: F1+TP3h (5战全胜)",
             "short_label": "SOXL极致版 (F1+TP3h)",
-            "rule_desc": "pre_c7_vol & (wks_52H≥30 或 8w低跌≤-80%) & PrevHigh买 | 持满45w&M_Fish≥2&乖离30W≥40%后周Fisher死叉止盈 (X1a兜底)",
+            "rule_desc": "pre_c7_vol & (wks_52H≥30 或 8w低跌≤-80%) & PrevHigh买 | 持满50w&M_Fish≥2&乖离30W≥40%后周Fisher死叉止盈 (X1a兜底)",
             "stats": stats,
             "trades": trades,
         }
@@ -826,7 +826,7 @@ def simulate_tp3h(
         "id": "F0_TP3h",
         "name": "通用大周期主动止盈: F0+TP3h (跨标的稳健)",
         "short_label": "通用止盈版 (F0+TP3h)",
-        "rule_desc": "pre_c7_vol & PrevHigh买 + SL_W25% | 持满45w&M_Fish≥2&乖离30W≥40%后周Fisher死叉止盈 (X1a兜底)",
+        "rule_desc": "pre_c7_vol & PrevHigh买 + SL_W25% | 持满50w&M_Fish≥2&乖离30W≥40%后周Fisher死叉止盈 (X1a兜底)",
         "stats": stats,
         "trades": trades,
     }
@@ -1086,9 +1086,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div class="group">
       <span class="group-label">策略标注</span>
       <select id="strategySelect" class="strategy-select">
-        <option value="C2_F1_or_MFishLin_TP3h" selected>SOXL防踏空旗舰: C2 (F1+月Fisher兜底)+TP3h (12年$9049万 / 15.5年$1.66亿, 0踏空)</option>
-        <option value="F1_TP3h">SOXL极致大周期: F1+TP3h (5笔全胜, 12年$9049万, 回撤-49.0%)</option>
-        <option value="F0_TP3h">通用大周期止盈: F0+TP3h (6笔, 12年$6088万, 回撤-50.3%)</option>
+        <option value="C2_F1_or_MFishLin_TP3h" selected>SOXL防踏空旗舰: C2 (F1+月Fisher兜底)+TP3h (12年$9931万 / 15.5年$1.82亿, 0踏空)</option>
+        <option value="F1_TP3h">SOXL极致大周期: F1+TP3h (5笔全胜, 12年$9931万, 回撤-49.0%)</option>
+        <option value="F0_TP3h">通用大周期止盈: F0+TP3h (6笔, 12年$6681万, 回撤-49.0%)</option>
         <option value="D1_X1a_WTSL35">策略3 极简大周期: D1_X1a_WTSL35 (6笔, 12年$3804万)</option>
         <option value="D1_X1a_WTSL35_Split50">策略3 分批建仓版: D1_X1a_WTSL35_Split50 (6笔, 12年$3012万, 回撤-54.4%)</option>
         <option value="H5_E2_Promote_S1_AdaptHV">策略4 双引擎旗舰: H5_E2_Promote_S1_AdaptHV (32笔, 12年$3791万, 回撤-52.0%)</option>
@@ -1711,10 +1711,10 @@ def main() -> None:
     h5 = simulate_h5_adapt_hv(feats)
 
     assert len(c7_entries) == 5, f"Expected 5 C7_Vol entries, got {len(c7_entries)}"
-    assert c2_tp3h["stats"]["trades"] == 5 and abs(c2_tp3h["stats"]["final"] - 90489657.17) < 1.0, c2_tp3h["stats"]
-    assert c2_15yr["stats"]["trades"] == 7 and abs(c2_15yr["stats"]["final"] - 166044243.09) < 1.0, c2_15yr["stats"]
-    assert f1_tp3h["stats"]["trades"] == 5 and abs(f1_tp3h["stats"]["final"] - 90489657.17) < 1.0 and f1_tp3h["stats"]["win_rate"] == 100.0, f1_tp3h["stats"]
-    assert f0_tp3h["stats"]["trades"] == 6 and abs(f0_tp3h["stats"]["final"] - 60877424.74) < 1.0 and f0_tp3h["stats"]["win_rate"] == 83.3, f0_tp3h["stats"]
+    assert c2_tp3h["stats"]["trades"] == 5 and abs(c2_tp3h["stats"]["final"] - 99311369.63) < 1.0, c2_tp3h["stats"]
+    assert c2_15yr["stats"]["trades"] == 7 and abs(c2_15yr["stats"]["final"] - 182231668.40) < 1.0, c2_15yr["stats"]
+    assert f1_tp3h["stats"]["trades"] == 5 and abs(f1_tp3h["stats"]["final"] - 99311369.63) < 1.0 and f1_tp3h["stats"]["win_rate"] == 100.0, f1_tp3h["stats"]
+    assert f0_tp3h["stats"]["trades"] == 6 and abs(f0_tp3h["stats"]["final"] - 66812281.30) < 1.0 and f0_tp3h["stats"]["win_rate"] == 83.3, f0_tp3h["stats"]
     assert d1_full["stats"]["trades"] == 6 and abs(d1_full["stats"]["final"] - 38035375.82) < 1.0, d1_full["stats"]
     assert d1_split["stats"]["trades"] == 6 and abs(d1_split["stats"]["final"] - 30120328.33) < 1.0, d1_split["stats"]
     assert h5["stats"]["trades"] == 32 and abs(h5["stats"]["final"] - 37913860.48) < 1.0, h5["stats"]
