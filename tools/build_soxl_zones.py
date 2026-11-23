@@ -160,6 +160,9 @@ def build_causal_features(df_soxl: pd.DataFrame, df_smh: pd.DataFrame) -> dict:
     max4w_vol_r = w["W_Vol_R"].rolling(4, min_periods=1).max()
 
     w["prev_W_High"] = w["High"].shift(1)
+    w["prev_W_Low"] = w["Low"].shift(1)
+    w["W_HigherLow"] = w["Low"] > w["prev_W_Low"]
+    w["Close_vs_52H%"] = (w["Close"] / w["High"].rolling(52, min_periods=1).max() - 1.0) * 100.0
     w["min8w_Low_200W_ratio"] = min_low_200_8w
     w["min4w_WF"] = min_wf_4w
     w["max4w_Vol_R"] = max4w_vol_r
@@ -172,7 +175,9 @@ def build_causal_features(df_soxl: pd.DataFrame, df_smh: pd.DataFrame) -> dict:
         & ((w["wks_52H"] >= 30) | (w["dd52_8wL%"] <= -80.0))
         & (w["Close"] > w["High"].shift(1))
     )
+    w["Deep85_HL"] = w["pre_c7_vol"] & (w["Close_vs_52H%"] <= -85.0) & w["W_HigherLow"]
     w["C2_F1_or_MFishLin"] = w["F1_E2_PrevHigh"] | w["MF_Lin_Buy"]
+    w["C2_Deep85HL"] = w["F1_E2_PrevHigh"] | w["Deep85_HL"] | w["MF_Lin_Buy"]
     w["ALT_Buy_S1"] = (w["W_Fisher"] < -1.8) & ((w["dW_Fish"] > 0) | (w["W_Vol_R"] > 1.3))
 
     daily_pos_map = {dt: pos for pos, dt in enumerate(daily.index)}
@@ -214,7 +219,12 @@ def build_live_market_snapshot(feats: dict) -> dict:
         "hv20": _safe_num(d_last["HV20"], 1),
         "w_date": str(w.index[-1].date()),
         "w_close": _safe_num(w_last["Close"], 2),
+        "w_low": _safe_num(w_last["Low"], 2),
         "prev_w_high": _safe_num(w_last["prev_W_High"], 2),
+        "prev_w_low": _safe_num(w_last["prev_W_Low"], 2),
+        "w_higher_low": bool(w_last["W_HigherLow"]),
+        "close_vs_52h_pct": _safe_num(w_last["Close_vs_52H%"], 1),
+        "deep85_hl": bool(w_last["Deep85_HL"]),
         "w_sma30": _safe_num(w_last["W_SMA30"], 2),
         "w_sma200": _safe_num(w_last["W_SMA200"], 2),
         "w_ema10": _safe_num(w_last["W_EMA10"], 2),
@@ -1251,9 +1261,9 @@ def simulate_tp3h(
     if strategy_id == "C2_F1_or_MFishLin_TP3h":
         return {
             "id": "C2_F1_or_MFishLin_TP3h",
-            "name": "SOXL 防踏空双保险旗舰: C2 (F1+月Fisher金叉兜底)+TP3h (15.5年$1.82亿 / 12年$9931万)",
-            "short_label": "SOXL防踏空旗舰 (C2+TP3h)",
-            "rule_desc": "主入口F1(200W+放量1.6x+30w|-80%+PrevHigh) 或 月线M_Fish<0.8金叉兜底 | 50w&M_Fish≥2&30W≥40%周Fisher死叉止盈 (X1a兜底)",
+            "name": "SOXL 高容错旗舰: C2+Deep85_HL+TP3h (12年$1.43亿 / 15.5年$2.62亿)",
+            "short_label": "SOXL高容错旗舰 (C2+Deep85_HL+TP3h)",
+            "rule_desc": "三入口: F1主入口 | Deep85+周HigherLow | 月Fisher<0.8金叉兜底 || 出口: 50w&M_Fish≥2&30W≥40%周Fisher死叉止盈 (X1a+SL_W25兜底)",
             "stats": stats,
             "trades": trades,
             "live_status": live_status,
@@ -1763,7 +1773,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div class="group">
       <span class="group-label">策略标注</span>
       <select id="strategySelect" class="strategy-select">
-        <option value="C2_F1_or_MFishLin_TP3h" selected>SOXL防踏空旗舰: C2 (F1+月Fisher兜底)+TP3h (12年$9931万 / 15.5年$1.82亿, 0踏空)</option>
+        <option value="C2_F1_or_MFishLin_TP3h" selected>SOXL高容错旗舰: C2+Deep85_HL+TP3h (12年$1.43亿 / 15.5年$2.62亿, 0踏空)</option>
         <option value="F1_TP3h">SOXL极致大周期: F1+TP3h (5笔全胜, 12年$9931万, 回撤-49.0%)</option>
         <option value="F0_TP3h">通用大周期止盈: F0+TP3h (6笔, 12年$6681万, 回撤-49.0%)</option>
         <option value="D1_X1a_WTSL35">策略3 极简大周期: D1_X1a_WTSL35 (6笔, 12年$3804万)</option>
@@ -2516,6 +2526,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           `W_Close $${fmtV(m.w_close)} vs 上周高 $${fmtV(m.prev_w_high)}`));
 
         if (useC2) {
+          const g_deep = [
+            radarCell("前置大底: pre_c7_vol 满足", m.pre_c7_vol,
+              `200W=${fmtV(m.min8w_low_200w, "x", 2)} | 4W_WF=${fmtV(m.min4w_wf)} | 量比=${fmtV(m.max4w_vol_r, "x")}`),
+            radarCell("极深回撤: 周收盘较52W高 ≤ -85%", m.close_vs_52h_pct !== null && m.close_vs_52h_pct <= -85.0,
+              `当前 ${fmtV(m.close_vs_52h_pct, "%", 1)}`),
+            radarCell("结构止跌: 周线 Higher Low (本周低 > 上周低)", Boolean(m.w_higher_low),
+              `本周低 $${fmtV(m.w_low)} vs 上周低 $${fmtV(m.prev_w_low)}`),
+          ];
           const g2 = [
             radarCell("月线处于低位: M_Fish < 0.8", m.m_fish_prev !== null && m.m_fish_prev < 0.8,
               `当前 M_Fish=${fmtV(m.m_fish_prev)} (< 0.8 允许触发)`),
@@ -2523,7 +2541,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
               `M_Fish=${fmtV(m.m_fish_prev)} vs Sig=${fmtV(m.m_fish_sig_prev)}`),
           ];
           groups.push(renderRadarGroup("入口规则 1 · F1 主入口（满足全部 5 项 → 买入 100%）", g1, "all"));
-          groups.push(renderRadarGroup("入口规则 2 · 月线 Fisher 金叉兜底（满足全部 2 项 → 买入 100%）", g2, "all"));
+          groups.push(renderRadarGroup("入口规则 2 · Deep85 + 周线 Higher Low（满足全部 3 项 → 买入 100%）", g_deep, "all"));
+          groups.push(renderRadarGroup("入口规则 3 · 月线 Fisher 金叉兜底（满足全部 2 项 → 买入 100%）", g2, "all"));
         } else if (isSplit) {
           const g2 = [
             radarCell("前置大底: pre_c7_vol 满足", m.pre_c7_vol,
@@ -2613,7 +2632,7 @@ def format_tg_summary(live_market: dict, strategies: dict[str, dict]) -> str:
     ]
 
     c2 = strategies["C2_F1_or_MFishLin_TP3h"]["live_status"]
-    lines.append(f"★ 主策略 C2+TP3h: {c2['badge']}")
+    lines.append(f"★ 主策略 C2+Deep85_HL+TP3h: {c2['badge']}")
     if c2["entry_date"]:
         lines.append(
             f"• 仓位: {c2['position_label']} | 入场 {c2['entry_date']} @ ${c2['entry_px']:.2f} | 浮盈 {c2['ret_pct']:+.1f}% | {c2['hold_weeks']}周"
@@ -2632,14 +2651,22 @@ def format_tg_summary(live_market: dict, strategies: dict[str, dict]) -> str:
         ]
         e1_done = sum(1 for _, ok in e1_checks if ok)
         e1_miss = [name for name, ok in e1_checks if not ok]
+        d_checks = [
+            ("pre_c7_vol", bool(m["pre_c7_vol"])),
+            ("52W跌幅≤-85%", m["close_vs_52h_pct"] is not None and m["close_vs_52h_pct"] <= -85.0),
+            (f"HigherLow(>${m['prev_w_low']:.2f})", bool(m["w_higher_low"])),
+        ]
+        d_done = sum(1 for _, ok in d_checks if ok)
+        d_miss = [name for name, ok in d_checks if not ok]
         e2_checks = [
             ("M_Fish<0.8", m["m_fish_prev"] is not None and m["m_fish_prev"] < 0.8),
             ("月线金叉", bool(m["mf_lin_buy"])),
         ]
         e2_done = sum(1 for _, ok in e2_checks if ok)
-        lines.append(f"• 入口1 (F1): {e1_done}/5 满足" + (f" (缺: {', '.join(e1_miss)})" if e1_miss else " (全部满足!)"))
+        lines.append(f"• 入口1 (F1主入口): {e1_done}/5 满足" + (f" (缺: {', '.join(e1_miss)})" if e1_miss else " (全部满足!)"))
+        lines.append(f"• 入口2 (Deep85+HL): {d_done}/3 满足" + (f" (缺: {', '.join(d_miss)})" if d_miss else " (全部满足!)"))
         lines.append(
-            f"• 入口2 (月Fisher兜底): {e2_done}/2 满足 (M_Fish={m['m_fish_prev']} vs Sig={m['m_fish_sig_prev']})"
+            f"• 入口3 (月Fisher兜底): {e2_done}/2 满足 (M_Fish={m['m_fish_prev']} vs Sig={m['m_fish_sig_prev']})"
         )
 
     lines.append("")
@@ -2727,7 +2754,7 @@ def main() -> None:
         feats,
         use_f1_filter=True,
         end_date=latest_date,
-        entry_col_override="C2_F1_or_MFishLin",
+        entry_col_override="C2_Deep85HL",
         mode_tag_override="BOT_C2",
         strategy_id="C2_F1_or_MFishLin_TP3h",
     )
