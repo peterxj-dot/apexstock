@@ -2,8 +2,16 @@
 
 from __future__ import annotations
 
+import argparse
+import html as html_lib
+import importlib.util
 import json
+import os
+import ssl
 import sys
+import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 import numpy as np
@@ -138,6 +146,7 @@ def build_causal_features(df_soxl: pd.DataFrame, df_smh: pd.DataFrame) -> dict:
     m_cross_up = (m_fish > m_sig) & (m_fish.shift(1) <= m_sig.shift(1)) & (m_fish.shift(1) < 0.8)
 
     w["M_Fish_prev"] = m_fish.reindex(w.index, method="ffill")
+    w["M_Fish_Sig_prev"] = m_sig.reindex(w.index, method="ffill")
     daily["M_Fish_prev_ffill"] = m_fish.reindex(daily.index, method="ffill")
 
     w["MF_Lin_Buy"] = False
@@ -149,6 +158,11 @@ def build_causal_features(df_soxl: pd.DataFrame, df_smh: pd.DataFrame) -> dict:
     min_low_200_8w = (1.0 + w["Low_vs_200W%"] / 100.0).rolling(8, min_periods=1).min()
     min_wf_4w = w["W_Fisher"].rolling(4, min_periods=1).min()
     max4w_vol_r = w["W_Vol_R"].rolling(4, min_periods=1).max()
+
+    w["prev_W_High"] = w["High"].shift(1)
+    w["min8w_Low_200W_ratio"] = min_low_200_8w
+    w["min4w_WF"] = min_wf_4w
+    w["max4w_Vol_R"] = max4w_vol_r
 
     w["pre_c7_vol"] = (min_low_200_8w <= 1.10) & (min_wf_4w < -1.5) & (max4w_vol_r >= 1.6)
     w["E1_C7Vol_EMA10"] = w["pre_c7_vol"] & (w["Close"] > w["W_EMA10"])
@@ -168,6 +182,56 @@ def build_causal_features(df_soxl: pd.DataFrame, df_smh: pd.DataFrame) -> dict:
         "daily": daily,
         "weekly": w,
         "week_end_daily_pos": week_end_daily_pos,
+    }
+
+
+def _safe_num(val, decimals: int = 2) -> float | None:
+    if val is None or pd.isna(val):
+        return None
+    f = float(val)
+    if not np.isfinite(f):
+        return None
+    return round(f, decimals)
+
+
+def build_live_market_snapshot(feats: dict) -> dict:
+    """Build latest-bar causal market snapshot for the HTML live cockpit."""
+    daily: pd.DataFrame = feats["daily"]
+    w: pd.DataFrame = feats["weekly"]
+    last_dt = daily.index[-1]
+    d_last = daily.iloc[-1]
+    w_last = w.iloc[-1]
+    weekday_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+    wd = int(last_dt.weekday())
+
+    return {
+        "last_date": str(last_dt.date()),
+        "weekday_cn": weekday_names[wd],
+        "is_friday": wd == 4,
+        "soxl_close": _safe_num(d_last["Close"], 2),
+        "smh_close": _safe_num(d_last["Bench_Close"], 2),
+        "smh_sma200": _safe_num(d_last["Bench_SMA200"], 2),
+        "hv20": _safe_num(d_last["HV20"], 1),
+        "w_date": str(w.index[-1].date()),
+        "w_close": _safe_num(w_last["Close"], 2),
+        "prev_w_high": _safe_num(w_last["prev_W_High"], 2),
+        "w_sma30": _safe_num(w_last["W_SMA30"], 2),
+        "w_sma200": _safe_num(w_last["W_SMA200"], 2),
+        "w_ema10": _safe_num(w_last["W_EMA10"], 2),
+        "w_fisher": _safe_num(w_last["W_Fisher"], 3),
+        "w_fisher_sig": _safe_num(w_last["W_Fisher_Sig"], 3),
+        "dw_fish": _safe_num(w_last["dW_Fish"], 3),
+        "w_vol_r": _safe_num(w_last["W_Vol_R"], 2),
+        "m_fish_prev": _safe_num(w_last["M_Fish_prev"], 3),
+        "m_fish_sig_prev": _safe_num(w_last["M_Fish_Sig_prev"], 3),
+        "mf_lin_buy": bool(w_last["MF_Lin_Buy"]),
+        "pre_c7_vol": bool(w_last["pre_c7_vol"]),
+        "min8w_low_200w": _safe_num(w_last["min8w_Low_200W_ratio"], 3),
+        "min4w_wf": _safe_num(w_last["min4w_WF"], 2),
+        "max4w_vol_r": _safe_num(w_last["max4w_Vol_R"], 2),
+        "wks_52h": _safe_num(w_last["wks_52H"], 0),
+        "dd52_8wl": _safe_num(w_last["dd52_8wL%"], 1),
+        "close_vs_30w_pct": _safe_num(w_last["Close_vs_30W%"], 1),
     }
 
 
@@ -415,6 +479,115 @@ def simulate_d1_x1a_wtsl35(
             }
         )
 
+    # Evaluate strictly causal live action at final bar i_end for next trading day's Open
+    w_live = w_df.iloc[week_end_daily_pos[i_end]] if i_end in week_end_daily_pos else w_df.iloc[-1]
+    cooldown_rem = max(0, cooldown_until_pos - i_end) if shares == 0 else 0
+    if shares > 0:
+        wc_live = float(w_live["Close"])
+        cur_peak_w = max(peak_w_close, wc_live)
+        mf_live = w_live["M_Fish_prev"]
+        unmatured_live = (pd.isna(mf_live) or float(mf_live) < 1.5) and (peak_d_close < avg_entry_px * 1.50)
+        live_act, live_badge, live_tone, live_reason = (
+            "HOLD",
+            "继续持有",
+            "hold",
+            "持仓中，未触发假底止损或逃顶信号",
+        )
+        if unmatured_live and wc_live < avg_entry_px * 0.75:
+            live_act, live_badge, live_tone, live_reason = (
+                "SELL",
+                "卖出 (假底止损)",
+                "sell",
+                f"触发 SL_W25%: 周收盘 {wc_live:.2f} < 均价75% ({avg_entry_px * 0.75:.2f})",
+            )
+        elif i_end > entry_fill_pos and pd.notna(mf_live) and float(mf_live) >= 2.0:
+            vs30_live = w_live["Close_vs_30W%"]
+            if pd.notna(vs30_live) and float(vs30_live) < 0.0:
+                live_act, live_badge, live_tone, live_reason = (
+                    "SELL",
+                    "卖出 (破30W逃顶)",
+                    "sell",
+                    f"M_Fish≥2.0 ({float(mf_live):.2f}) 且周收盘跌破 30周SMA",
+                )
+            elif cur_peak_w > 0.0 and wc_live <= cur_peak_w * 0.65:
+                live_act, live_badge, live_tone, live_reason = (
+                    "SELL",
+                    "卖出 (周回撤35%逃顶)",
+                    "sell",
+                    f"M_Fish≥2.0 ({float(mf_live):.2f}) 且自峰值 {cur_peak_w:.2f} 回撤≥35%",
+                )
+        if live_act == "HOLD" and use_split_50_50 and tranches == 1 and bool(w_live["E1_C7Vol_EMA10"]):
+            live_act, live_badge, live_tone, live_reason = (
+                "BUY_TOPUP",
+                "加仓补满 (50%→100%)",
+                "buy",
+                "满足 E1_C7Vol_EMA10，下个交易日开盘补齐剩余 50%",
+            )
+        live_ret = round(float((cash + shares * closes[i_end]) / trade_cash_start - 1.0) * 100.0, 1)
+        pos_pct = 50 if (use_split_50_50 and tranches == 1) else 100
+        live_status = {
+            "action": live_act,
+            "badge": live_badge,
+            "tone": live_tone,
+            "position_label": f"持仓 {pos_pct}% ({trade_mode})",
+            "pos_mode": "BOT",
+            "entry_date": entry_date_str,
+            "entry_px": round(avg_entry_px, 2),
+            "ret_pct": live_ret,
+            "hold_weeks": None,
+            "high_zone_armed": False,
+            "sl_price": round(avg_entry_px * 0.75, 2) if unmatured_live else None,
+            "wtsl_price": round(cur_peak_w * 0.65, 2) if cur_peak_w > 0.0 else None,
+            "cooldown_days": 0,
+            "reason": live_reason,
+        }
+    else:
+        live_act, live_badge, live_tone, live_reason = (
+            "WAIT",
+            "保持空仓",
+            "wait",
+            f"冷静期剩余 {cooldown_rem} 个交易日" if cooldown_rem > 0 else "空仓观望，等待大底入场信号",
+        )
+        if not just_exited and i_end >= cooldown_until_pos:
+            if use_split_50_50:
+                if bool(w_live["E1_C7Vol_EMA10"]):
+                    live_act, live_badge, live_tone, live_reason = (
+                        "BUY",
+                        "买入 100% (E1建仓)",
+                        "buy",
+                        "满足 pre_c7_vol 且周收盘 > 10周EMA，下个交易日开盘全仓买入",
+                    )
+                elif bool(w_live["E2_PrevHigh"]):
+                    live_act, live_badge, live_tone, live_reason = (
+                        "BUY_HALF",
+                        "买入 50% (E2分批建仓)",
+                        "buy",
+                        "满足 pre_c7_vol 且周收盘 > 上周高点，下个交易日开盘先买 50%",
+                    )
+            elif bool(w_live["E2_PrevHigh"]):
+                live_act, live_badge, live_tone, live_reason = (
+                    "BUY",
+                    "买入 100% (E2建仓)",
+                    "buy",
+                    "满足 pre_c7_vol 且周收盘 > 上周高点，下个交易日开盘全仓买入",
+                )
+        live_status = {
+            "action": live_act,
+            "badge": live_badge,
+            "tone": live_tone,
+            "position_label": "空仓 (0%)",
+            "pos_mode": "FLAT",
+            "entry_date": None,
+            "entry_px": None,
+            "ret_pct": None,
+            "hold_weeks": None,
+            "high_zone_armed": False,
+            "sl_price": None,
+            "wtsl_price": None,
+            "cooldown_days": cooldown_rem,
+            "reason": live_reason,
+        }
+
     stats = _compute_stats(equity, trades, days_invested, idx[i_start : i_end + 1])
     if use_split_50_50:
         return {
@@ -424,6 +597,7 @@ def simulate_d1_x1a_wtsl35(
             "rule_desc": "pre_c7_vol + PrevHigh先买50%/EMA10补满 | 假底SL_W25% | M_Fish≥2.0后 破30W或周回撤35%逃顶",
             "stats": stats,
             "trades": trades,
+            "live_status": live_status,
         }
     return {
         "id": "D1_X1a_WTSL35",
@@ -432,6 +606,7 @@ def simulate_d1_x1a_wtsl35(
         "rule_desc": "pre_c7_vol + 周收盘>上周高点买入 | 假底SL_W25% | M_Fish≥2.0后 破30W或周回撤35%逃顶",
         "stats": stats,
         "trades": trades,
+        "live_status": live_status,
     }
 
 
@@ -629,6 +804,170 @@ def simulate_h5_adapt_hv(
             }
         )
 
+    # Evaluate strictly causal live action at final bar i_end for next trading day's Open
+    hv_live = hv20[i_end]
+    bc_live = b_close[i_end]
+    bs_live = b_sma200[i_end]
+    c_live = closes[i_end]
+    m_ff_live = m_fish_ffill[i_end]
+    w_live = w_df.iloc[week_end_daily_pos[i_end]] if i_end in week_end_daily_pos else None
+    hv_limit_live = 140.0 if (np.isnan(m_ff_live) or m_ff_live < 1.5) else 115.0
+    vol_exit_live = (not np.isnan(hv_live)) and (hv_live > hv_limit_live)
+    valid_bench_live = (not np.isnan(bc_live)) and (not np.isnan(bs_live))
+    ma_break_live = valid_bench_live and (bc_live < bs_live * 0.99)
+    tb_raw_live = valid_bench_live and (bc_live > bs_live * 1.01)
+    tb_def_live = tb_raw_live and (not np.isnan(hv_live)) and (hv_live <= 115.0 * 0.92)
+    tb_after_vol_live = tb_raw_live and (not np.isnan(hv_live)) and (hv_live <= 95.0) and (not vol_exit_live)
+
+    if pos_mode != 0:
+        live_ret = round(float((c_live / (entry_px * (1.0 + FEE_RATE)) - 1.0) * 100.0), 1)
+        cur_mode_name = {1: "TREND", 2: "ALT", 3: "BOT"}[pos_mode]
+        live_act, live_badge, live_tone, live_reason = (
+            "HOLD",
+            "继续持有",
+            "hold",
+            f"{cur_mode_name} 持仓中，未触发离场条件",
+        )
+        if pos_mode == 3:
+            hit_sl_live = False
+            if w_live is not None:
+                m_w_live = w_live["M_Fish_prev"]
+                unm_live = (pd.isna(m_w_live) or float(m_w_live) < 1.5) and (peak_d_close < entry_px * 1.50)
+                if unm_live and float(w_live["Close"]) < entry_px * 0.75:
+                    hit_sl_live = True
+            if hit_sl_live:
+                live_act, live_badge, live_tone, live_reason = (
+                    "SELL",
+                    "卖出 (假底止损)",
+                    "sell",
+                    f"触发 SL_W25: 周收盘 < 买入价75% ({entry_px * 0.75:.2f})",
+                )
+            elif tb_raw_live and (not vol_exit_live) and (not ma_break_live):
+                live_reason = "SMH > 200SMA×1.01 且波动率可控，BOT 已晋升为 TREND 趋势仓"
+        elif pos_mode == 1:
+            if vol_exit_live:
+                live_act, live_badge, live_tone, live_reason = (
+                    "SELL",
+                    "卖出 (波动率刹车)",
+                    "sell",
+                    f"HV20={hv_live:.1f}% > 自适应上限 {hv_limit_live:.0f}% (VOL_SPIKE)",
+                )
+            elif ma_break_live:
+                live_act, live_badge, live_tone, live_reason = (
+                    "SELL",
+                    "卖出 (趋势跌破)",
+                    "sell",
+                    f"SMH 收盘 {bc_live:.2f} < 200SMA×0.99 ({bs_live * 0.99:.2f})",
+                )
+        elif pos_mode == 2:
+            if c_live <= entry_px * 0.80:
+                live_act, live_badge, live_tone, live_reason = (
+                    "SELL",
+                    "卖出 (ALT止损-20%)",
+                    "sell",
+                    f"收盘 {c_live:.2f} ≤ 买入价80% ({entry_px * 0.80:.2f})",
+                )
+            elif c_live >= entry_px * 1.25 or (i_end - entry_idx) >= 40:
+                live_act, live_badge, live_tone, live_reason = (
+                    "SELL",
+                    "卖出 (ALT止盈/超时)",
+                    "sell",
+                    f"触发 +25% 止盈或持仓满 40 日 ({i_end - entry_idx} 日)",
+                )
+        live_status = {
+            "action": live_act,
+            "badge": live_badge,
+            "tone": live_tone,
+            "position_label": f"持仓 100% ({initial_mode_str + ('->TREND' if promoted_in_trade else '')})",
+            "pos_mode": cur_mode_name,
+            "entry_date": idx[entry_idx].strftime("%Y-%m-%d"),
+            "entry_px": round(entry_px, 2),
+            "ret_pct": live_ret,
+            "hold_weeks": None,
+            "high_zone_armed": False,
+            "sl_price": round(entry_px * (0.80 if pos_mode == 2 else 0.75), 2) if pos_mode in (2, 3) else None,
+            "wtsl_price": None,
+            "cooldown_days": 0,
+            "reason": live_reason,
+        }
+    else:
+        elapsed_live = i_end - exit_idx
+        cooldown_rem = max(0, 10 - elapsed_live) if last_exit_reason in ("SL_W25", "ALT_FSL", "ALT_TP") else 0
+        bot_sig_live = bool(w_live is not None and bool(w_live["E2_PrevHigh"]))
+        alt_sig_live = bool(w_live is not None and bool(w_live["ALT_Buy_S1"]))
+        pending_live = 0
+        live_reason = "空仓观望，等待趋势或恐慌/大底信号"
+        if not just_exited:
+            if last_exit_reason == "SL_W25":
+                if elapsed_live >= 10 and bot_sig_live:
+                    pending_live = 3
+            else:
+                bot_allowed_live = (elapsed_live >= 10) if last_exit_reason in ("ALT_FSL", "ALT_TP") else True
+                if last_exit_reason in ("INIT", "TREND_BREAK"):
+                    if tb_def_live:
+                        pending_live = 1
+                    elif bot_allowed_live and bot_sig_live:
+                        pending_live = 3
+                    elif alt_sig_live:
+                        pending_live = 2
+                elif last_exit_reason == "VOL_SPIKE":
+                    if tb_after_vol_live:
+                        pending_live = 1
+                    elif bot_allowed_live and bot_sig_live:
+                        pending_live = 3
+                    elif alt_sig_live:
+                        pending_live = 2
+                elif last_exit_reason in ("ALT_FSL", "ALT_TP") and elapsed_live >= 10:
+                    if tb_def_live:
+                        pending_live = 1
+                    elif bot_sig_live:
+                        pending_live = 3
+                    elif alt_sig_live:
+                        pending_live = 2
+        if pending_live == 1:
+            live_act, live_badge, live_tone, live_reason = (
+                "BUY",
+                "买入 100% (TREND趋势)",
+                "buy",
+                f"SMH > 200SMA×1.01 且 HV20={hv_live:.1f}% 达标",
+            )
+        elif pending_live == 3:
+            live_act, live_badge, live_tone, live_reason = (
+                "BUY",
+                "买入 100% (BOT大底)",
+                "buy",
+                "满足 E2_PrevHigh 大底早买信号",
+            )
+        elif pending_live == 2:
+            live_act, live_badge, live_tone, live_reason = (
+                "BUY",
+                "买入 100% (ALT恐慌底)",
+                "buy",
+                "满足 W_Fisher<-1.8 恐慌抄底信号",
+            )
+        else:
+            live_act, live_badge, live_tone = "WAIT", "保持空仓", "wait"
+            if cooldown_rem > 0:
+                live_reason = f"离场冷静期剩余 {cooldown_rem} 个交易日"
+            elif last_exit_reason == "VOL_SPIKE":
+                live_reason = f"上次因高波离场，需等 HV20 ≤ 95%（当前 {hv_live:.1f}%）"
+        live_status = {
+            "action": live_act,
+            "badge": live_badge,
+            "tone": live_tone,
+            "position_label": "空仓 (0%)",
+            "pos_mode": "FLAT",
+            "entry_date": None,
+            "entry_px": None,
+            "ret_pct": None,
+            "hold_weeks": None,
+            "high_zone_armed": False,
+            "sl_price": None,
+            "wtsl_price": None,
+            "cooldown_days": cooldown_rem,
+            "reason": live_reason,
+        }
+
     stats = _compute_stats(equity, trades, days_invested, idx[i_start : i_end + 1])
     return {
         "id": "H5_E2_Promote_S1_AdaptHV",
@@ -637,6 +976,7 @@ def simulate_h5_adapt_hv(
         "rule_desc": "E2大底早买(SL_W25)->无缝晋升SMH200D趋势仓 | 自适应HV刹车(M_Fish<1.5容忍140%, ≥1.5限115%) | 熊市ALT快撤",
         "stats": stats,
         "trades": trades,
+        "live_status": live_status,
     }
 
 
@@ -803,6 +1143,110 @@ def simulate_tp3h(
             }
         )
 
+    # Evaluate strictly causal live action at final bar i_end for next trading day's Open
+    w_pos_live = week_end_daily_pos[i_end] if i_end in week_end_daily_pos else (len(w_df) - 1)
+    w_live = w_df.iloc[w_pos_live]
+    cooldown_rem = max(0, cooldown_until_pos - i_end) if shares == 0 else 0
+    if shares > 0:
+        wc_live = float(w_live["Close"])
+        cur_peak_w = max(peak_w_close, wc_live)
+        mf_live = w_live["M_Fish_prev"]
+        vs30_live = w_live["Close_vs_30W%"]
+        unmatured_live = (pd.isna(mf_live) or float(mf_live) < 1.5) and (peak_d_close < avg_entry_px * 1.50)
+        hold_w_live = int(w_pos_live - entry_sig_w_pos)
+        armed_live = bool(
+            high_zone_armed
+            or (hold_w_live >= 50 and pd.notna(mf_live) and float(mf_live) >= 2.0 and pd.notna(vs30_live) and float(vs30_live) >= 40.0)
+        )
+        live_act, live_badge, live_tone, live_reason = (
+            "HOLD",
+            "继续持有",
+            "hold",
+            f"已持仓 {hold_w_live} 周，" + ("高位止盈区已激活，等待周Fisher死叉" if armed_live else "等待高位止盈区激活 (50w+M_Fish≥2+30W≥40%)"),
+        )
+        if unmatured_live and wc_live < avg_entry_px * 0.75:
+            live_act, live_badge, live_tone, live_reason = (
+                "SELL",
+                "卖出 (假底止损)",
+                "sell",
+                f"触发 SL_W25%: 周收盘 {wc_live:.2f} < 买入价75% ({avg_entry_px * 0.75:.2f})",
+            )
+        elif i_end > entry_fill_pos:
+            if (
+                armed_live
+                and pd.notna(w_live["W_Fisher"])
+                and pd.notna(w_live["W_Fisher_Sig"])
+                and float(w_live["W_Fisher"]) < float(w_live["W_Fisher_Sig"])
+            ):
+                live_act, live_badge, live_tone, live_reason = (
+                    "SELL",
+                    "卖出 (TP3h高位止盈)",
+                    "sell",
+                    f"高位区已激活且周 Fisher ({float(w_live['W_Fisher']):.2f}) < Signal ({float(w_live['W_Fisher_Sig']):.2f})",
+                )
+            elif pd.notna(mf_live) and float(mf_live) >= 2.0:
+                if pd.notna(vs30_live) and float(vs30_live) < 0.0:
+                    live_act, live_badge, live_tone, live_reason = (
+                        "SELL",
+                        "卖出 (破30W兜底逃顶)",
+                        "sell",
+                        f"M_Fish≥2.0 ({float(mf_live):.2f}) 且周收盘跌破 30周SMA",
+                    )
+                elif cur_peak_w > 0.0 and wc_live <= cur_peak_w * 0.65:
+                    live_act, live_badge, live_tone, live_reason = (
+                        "SELL",
+                        "卖出 (周回撤35%逃顶)",
+                        "sell",
+                        f"M_Fish≥2.0 ({float(mf_live):.2f}) 且自峰值 {cur_peak_w:.2f} 回撤≥35%",
+                    )
+        live_ret = round((closes[i_end] / (avg_entry_px * (1.0 + FEE_RATE)) - 1.0) * 100.0, 1)
+        live_status = {
+            "action": live_act,
+            "badge": live_badge,
+            "tone": live_tone,
+            "position_label": f"持仓 100% ({mode_tag})",
+            "pos_mode": "BOT",
+            "entry_date": entry_date_str,
+            "entry_px": round(avg_entry_px, 2),
+            "ret_pct": live_ret,
+            "hold_weeks": hold_w_live,
+            "high_zone_armed": armed_live,
+            "sl_price": round(avg_entry_px * 0.75, 2) if unmatured_live else None,
+            "wtsl_price": round(cur_peak_w * 0.65, 2) if cur_peak_w > 0.0 else None,
+            "cooldown_days": 0,
+            "reason": live_reason,
+        }
+    else:
+        live_act, live_badge, live_tone, live_reason = (
+            "WAIT",
+            "保持空仓",
+            "wait",
+            f"冷静期剩余 {cooldown_rem} 个交易日" if cooldown_rem > 0 else "空仓观望，等待大底或月线金叉信号",
+        )
+        if not just_exited and i_end >= cooldown_until_pos and bool(w_live[entry_col]):
+            live_act, live_badge, live_tone, live_reason = (
+                "BUY",
+                "买入 100% (触发建仓信号)",
+                "buy",
+                f"满足 {entry_col} 入场信号，下个交易日开盘全仓买入",
+            )
+        live_status = {
+            "action": live_act,
+            "badge": live_badge,
+            "tone": live_tone,
+            "position_label": "空仓 (0%)",
+            "pos_mode": "FLAT",
+            "entry_date": None,
+            "entry_px": None,
+            "ret_pct": None,
+            "hold_weeks": None,
+            "high_zone_armed": False,
+            "sl_price": None,
+            "wtsl_price": None,
+            "cooldown_days": cooldown_rem,
+            "reason": live_reason,
+        }
+
     stats = _compute_stats(equity, trades, days_invested, idx[i_start : i_end + 1])
     if strategy_id == "C2_F1_or_MFishLin_TP3h":
         return {
@@ -812,6 +1256,7 @@ def simulate_tp3h(
             "rule_desc": "主入口F1(200W+放量1.6x+30w|-80%+PrevHigh) 或 月线M_Fish<0.8金叉兜底 | 50w&M_Fish≥2&30W≥40%周Fisher死叉止盈 (X1a兜底)",
             "stats": stats,
             "trades": trades,
+            "live_status": live_status,
         }
     if use_f1_filter:
         return {
@@ -821,6 +1266,7 @@ def simulate_tp3h(
             "rule_desc": "pre_c7_vol & (wks_52H≥30 或 8w低跌≤-80%) & PrevHigh买 | 持满50w&M_Fish≥2&乖离30W≥40%后周Fisher死叉止盈 (X1a兜底)",
             "stats": stats,
             "trades": trades,
+            "live_status": live_status,
         }
     return {
         "id": "F0_TP3h",
@@ -829,6 +1275,7 @@ def simulate_tp3h(
         "rule_desc": "pre_c7_vol & PrevHigh买 + SL_W25% | 持满50w&M_Fish≥2&乖离30W≥40%后周Fisher死叉止盈 (X1a兜底)",
         "stats": stats,
         "trades": trades,
+        "live_status": live_status,
     }
 
 
@@ -1005,6 +1452,236 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       height: 20px;
       background: var(--border);
     }
+    .live-cockpit {
+      margin: 12px 20px 6px;
+      padding: 14px 18px;
+      background: linear-gradient(135deg, rgba(22, 27, 34, 0.96), rgba(15, 21, 30, 0.98));
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      display: grid;
+      grid-template-columns: minmax(290px, 1.05fr) minmax(360px, 1.45fr);
+      gap: 16px;
+      align-items: stretch;
+    }
+    @media (max-width: 960px) {
+      .live-cockpit {
+        grid-template-columns: 1fr;
+      }
+    }
+    .cockpit-main {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 12px;
+    }
+    .cockpit-meta {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      font-size: 13.5px;
+      color: var(--text);
+    }
+    .fresh-pill {
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: rgba(88, 166, 255, 0.16);
+      color: #79c0ff;
+      border: 1px solid rgba(88, 166, 255, 0.40);
+      font-weight: 700;
+      font-size: 13px;
+    }
+    .warn-pill {
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: rgba(210, 153, 34, 0.20);
+      color: #f0b840;
+      border: 1px solid rgba(210, 153, 34, 0.45);
+      font-weight: 700;
+      font-size: 12.5px;
+    }
+    .action-box {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 16px 18px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      border-left-width: 5px;
+      background: rgba(13, 17, 23, 0.78);
+    }
+    .action-box.tone-buy {
+      border-color: #3fb950;
+      background: rgba(46, 160, 67, 0.18);
+    }
+    .action-box.tone-sell {
+      border-color: #f85149;
+      background: rgba(248, 81, 73, 0.18);
+    }
+    .action-box.tone-hold {
+      border-color: #58a6ff;
+      background: rgba(56, 139, 253, 0.16);
+    }
+    .action-box.tone-wait {
+      border-color: #d29922;
+      background: rgba(210, 153, 34, 0.13);
+    }
+    .action-badge {
+      font-size: 22px;
+      font-weight: 800;
+      padding: 10px 16px;
+      border-radius: 8px;
+      white-space: nowrap;
+      letter-spacing: 0.4px;
+    }
+    .tone-buy .action-badge {
+      background: #238636;
+      color: #ffffff;
+      box-shadow: 0 0 14px rgba(63, 185, 80, 0.42);
+    }
+    .tone-sell .action-badge {
+      background: #da3633;
+      color: #ffffff;
+      box-shadow: 0 0 14px rgba(248, 81, 73, 0.42);
+    }
+    .tone-hold .action-badge {
+      background: #1f6feb;
+      color: #ffffff;
+      box-shadow: 0 0 12px rgba(88, 166, 255, 0.35);
+    }
+    .tone-wait .action-badge {
+      background: #9e6a03;
+      color: #ffffff;
+      box-shadow: 0 0 10px rgba(210, 153, 34, 0.28);
+    }
+    .action-detail {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      min-width: 0;
+    }
+    .action-pos {
+      font-size: 15px;
+      font-weight: 700;
+      color: #f0f6fc;
+    }
+    .action-reason {
+      font-size: 13.5px;
+      color: #c9d1d9;
+      line-height: 1.5;
+    }
+    .cockpit-holding-strip {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 13.5px;
+      color: #c9d1d9;
+    }
+    .cockpit-holding-strip b { color: #f0f6fc; }
+    .cockpit-radar {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      border-left: 1px solid var(--border);
+      padding-left: 16px;
+    }
+    @media (max-width: 960px) {
+      .cockpit-radar {
+        border-left: none;
+        border-top: 1px solid var(--border);
+        padding-left: 0;
+        padding-top: 12px;
+      }
+    }
+    .radar-title {
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .radar-groups {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .radar-group {
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid rgba(48, 54, 61, 0.9);
+      background: rgba(13, 17, 23, 0.45);
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+    .radar-group-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+      font-weight: 700;
+      color: #c9d1d9;
+    }
+    .radar-group-tag {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 1px 8px;
+      border-radius: 999px;
+      background: rgba(139, 148, 158, 0.16);
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .radar-group-tag.ready {
+      background: rgba(63, 185, 80, 0.18);
+      color: var(--green);
+    }
+    .radar-group-tag.alert {
+      background: rgba(248, 81, 73, 0.18);
+      color: var(--red);
+    }
+    .radar-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(215px, 1fr));
+      gap: 8px;
+    }
+    .radar-item {
+      padding: 7px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: rgba(13, 17, 23, 0.72);
+      font-size: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .radar-item.ok {
+      border-color: rgba(63, 185, 80, 0.45);
+      background: rgba(63, 185, 80, 0.08);
+    }
+    .radar-item.warn {
+      border-color: rgba(210, 153, 34, 0.45);
+      background: rgba(210, 153, 34, 0.08);
+    }
+    .radar-item-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      font-weight: 600;
+      color: var(--text);
+    }
+    .radar-flag {
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .radar-item.ok .radar-flag { color: var(--green); }
+    .radar-item.warn .radar-flag { color: var(--amber); }
+    .radar-item.miss .radar-flag { color: var(--muted); }
+    .radar-item-val {
+      font-size: 11px;
+      color: var(--muted);
+    }
     #chart {
       width: 100%;
       height: 68vh;
@@ -1114,6 +1791,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
   </div>
 
+  <div id="liveCockpit" class="live-cockpit"></div>
+
   <div id="chart"></div>
 
   <div class="table-wrap">
@@ -1146,6 +1825,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     const WEEKLY_SMA = __WEEKLY_SMA_JSON__;
     const C7_ENTRIES = __C7_ENTRIES_JSON__;
     const STRATEGIES = __STRATEGIES_JSON__;
+    const LIVE_MARKET = __LIVE_MARKET_JSON__;
 
     function detectZigZag(bars, upTh, downTh) {
       const pivots = [];
@@ -1636,6 +2316,245 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         `共识别 ${zones.length} 个月线顶底区域（上涨 ≥ ${(upTh * 100).toFixed(0)}% / 回撤 ≥ ${(downTh * 100).toFixed(0)}%）${stratInfo}`;
 
       renderStrategyTable(stratId);
+      renderLiveCockpit(stratId);
+    }
+
+    function fmtV(val, suffix = "", digits = 2) {
+      if (val === null || val === undefined || Number.isNaN(val)) return "—";
+      return `${Number(val).toFixed(digits)}${suffix}`;
+    }
+
+    function radarCell(title, ok, valueText, warn = false) {
+      const cls = ok ? "ok" : (warn ? "warn" : "miss");
+      const flag = ok ? "✓ 满足" : (warn ? "! 接近" : "○ 未满足");
+      return {
+        ok: Boolean(ok),
+        html: `<div class="radar-item ${cls}">
+          <div class="radar-item-head"><span>${title}</span><span class="radar-flag">${flag}</span></div>
+          <div class="radar-item-val">${valueText}</div>
+        </div>`,
+      };
+    }
+
+    function renderRadarGroup(title, cells, mode = "all") {
+      const done = cells.filter(c => c.ok).length;
+      const total = cells.length;
+      let tagText = `已满足 ${done}/${total}`;
+      let tagCls = "";
+      if (mode === "all") {
+        if (done === total && total > 0) tagCls = "ready";
+      } else if (mode === "any_exit") {
+        tagText = done > 0 ? `已触发 ${done} 项` : `未触发 (0/${total})`;
+        if (done > 0) tagCls = "alert";
+      } else if (mode === "any_entry") {
+        tagText = done > 0 ? `已触发 ${done} 项` : `未触发 (0/${total})`;
+        if (done > 0) tagCls = "ready";
+      }
+      return `<div class="radar-group">
+        <div class="radar-group-head">
+          <span>${title}</span>
+          <span class="radar-group-tag ${tagCls}">${tagText}</span>
+        </div>
+        <div class="radar-grid">${cells.map(c => c.html).join("")}</div>
+      </div>`;
+    }
+
+    function renderLiveCockpit(stratId) {
+      const box = document.getElementById("liveCockpit");
+      if (!LIVE_MARKET) {
+        box.style.display = "none";
+        return;
+      }
+      box.style.display = "grid";
+      const m = LIVE_MARKET;
+      const st = STRATEGIES[stratId];
+      const ls = st ? st.live_status : null;
+
+      const freshHtml = `
+        <span class="fresh-pill">最新交易日: ${m.last_date} (${m.weekday_cn})</span>
+        ${m.is_friday ? "" : `<span class="warn-pill">非周五收盘（周中或节假日数据）</span>`}
+        <span>SOXL <b>$${fmtV(m.soxl_close)}</b></span>
+        <span>SMH <b>$${fmtV(m.smh_close)}</b> (200SMA $${fmtV(m.smh_sma200)})</span>
+        <span>HV20 <b>${fmtV(m.hv20, "%", 1)}</b></span>
+      `;
+
+      let actionHtml = "";
+      let holdingHtml = "";
+      if (ls) {
+        actionHtml = `
+          <div class="action-box tone-${ls.tone}">
+            <div class="action-badge">${ls.badge}</div>
+            <div class="action-detail">
+              <div class="action-pos">当前仓位: ${ls.position_label} ｜ 下个交易日开盘执行</div>
+              <div class="action-reason">${ls.reason}</div>
+            </div>
+          </div>
+        `;
+        if (ls.entry_date) {
+          const retCls = ls.ret_pct >= 0 ? "pos" : "neg";
+          const retTxt = `${ls.ret_pct >= 0 ? "+" : ""}${ls.ret_pct.toFixed(1)}%`;
+          holdingHtml = `<div class="cockpit-holding-strip">
+            <span>入场日: <b>${ls.entry_date}</b></span>
+            <span>成本均价: <b>$${ls.entry_px.toFixed(2)}</b></span>
+            <span>当前浮盈: <b class="${retCls}">${retTxt}</b></span>
+            ${ls.hold_weeks !== null ? `<span>已持仓: <b>${ls.hold_weeks} 周</b></span>` : ""}
+            ${ls.sl_price !== null ? `<span>假底止损线: <b>$${ls.sl_price.toFixed(2)}</b></span>` : ""}
+            ${ls.wtsl_price !== null ? `<span>周回撤35%线: <b>$${ls.wtsl_price.toFixed(2)}</b></span>` : ""}
+          </div>`;
+        }
+      } else {
+        actionHtml = `
+          <div class="action-box tone-wait">
+            <div class="action-badge">仅观察 / 信号叠加</div>
+            <div class="action-detail">
+              <div class="action-pos">当前未选定自动仓位策略 (${stratId})</div>
+              <div class="action-reason">请在顶部策略下拉框选择 C2 / F1 / 策略3 / 策略4 查看完整买卖指令。</div>
+            </div>
+          </div>
+        `;
+      }
+
+      const groups = [];
+      if (stratId === "H5_E2_Promote_S1_AdaptHV" && ls) {
+        const hvLim = (m.m_fish_prev === null || m.m_fish_prev < 1.5) ? 140 : 115;
+        if (ls.pos_mode !== "FLAT") {
+          const breakPx = m.smh_sma200 ? m.smh_sma200 * 0.99 : null;
+          const g1 = [
+            radarCell("趋势跌破: SMH < 200SMA×0.99", m.smh_close && breakPx ? m.smh_close < breakPx : false,
+              `SMH $${fmtV(m.smh_close)} vs 跌破线 $${fmtV(breakPx)}`),
+            radarCell(`波动率刹车: HV20 > ${hvLim}%`, m.hv20 !== null ? m.hv20 > hvLim : false,
+              `当前 HV20 ${fmtV(m.hv20, "%", 1)} (M_Fish=${fmtV(m.m_fish_prev)})`),
+          ];
+          const g2 = [
+            radarCell("假底止损 SL_W25 (仅BOT未成熟期)", ls.sl_price !== null && m.w_close !== null ? m.w_close < ls.sl_price : false,
+              ls.sl_price !== null ? `W_Close $${fmtV(m.w_close)} vs 止损 $${fmtV(ls.sl_price)}` : "当前非BOT/ALT止损模式"),
+            radarCell("月线热区 (M_Fish ≥ 1.5 切严格刹车)", m.m_fish_prev !== null ? m.m_fish_prev >= 1.5 : false,
+              `当前 M_Fish_prev ${fmtV(m.m_fish_prev)}`, m.m_fish_prev !== null && m.m_fish_prev >= 1.0),
+          ];
+          groups.push(renderRadarGroup("出口规则 1 · 趋势 / 自适应波动率离场（任一触发即卖出）", g1, "any_exit"));
+          groups.push(renderRadarGroup("出口规则 2 · 假底保护与热区状态", g2, "any_exit"));
+        } else {
+          const buyPx = m.smh_sma200 ? m.smh_sma200 * 1.01 : null;
+          const g1 = [
+            radarCell("SMH > 200SMA×1.01", m.smh_close && buyPx ? m.smh_close > buyPx : false,
+              `SMH $${fmtV(m.smh_close)} vs 门槛 $${fmtV(buyPx)}`),
+            radarCell("HV20 ≤ 105.8% (高波离场需≤95%)", m.hv20 !== null ? m.hv20 <= 105.8 : false,
+              `当前 HV20 ${fmtV(m.hv20, "%", 1)}`),
+          ];
+          const g2 = [
+            radarCell("BOT大底: pre_c7_vol + 站上周高", m.pre_c7_vol && m.w_close !== null && m.prev_w_high !== null && m.w_close > m.prev_w_high,
+              `8W/200W=${fmtV(m.min8w_low_200w, "x", 2)} | 4W_WF=${fmtV(m.min4w_wf)} | 上周高=$${fmtV(m.prev_w_high)}`),
+            radarCell("ALT恐慌: W_Fish < -1.8 & 拐头/放量", m.w_fisher !== null && m.w_fisher < -1.8 && ((m.dw_fish !== null && m.dw_fish > 0) || (m.w_vol_r !== null && m.w_vol_r > 1.3)),
+              `W_Fish=${fmtV(m.w_fisher)} | 量比=${fmtV(m.w_vol_r, "x")}`),
+          ];
+          groups.push(renderRadarGroup("入口规则 1 · SMH 趋势仓 (TREND，满足全部 → 买入)", g1, "all"));
+          groups.push(renderRadarGroup("入口规则 2 · 大底早买 (BOT) / 恐慌底 (ALT，任一 → 买入)", g2, "any_entry"));
+        }
+      } else if (ls && ls.pos_mode !== "FLAT") {
+        const isTp3h = stratId.includes("TP3h");
+        if (isTp3h) {
+          const wfCrossDown = m.w_fisher !== null && m.w_fisher_sig !== null && m.w_fisher < m.w_fisher_sig;
+          const g1 = [
+            radarCell("持仓满 50 周", ls.hold_weeks !== null && ls.hold_weeks >= 50,
+              `当前已持仓 ${ls.hold_weeks ?? 0} / 50 周`),
+            radarCell("月线 M_Fish ≥ 2.0", m.m_fish_prev !== null && m.m_fish_prev >= 2.0,
+              `当前 M_Fish_prev ${fmtV(m.m_fish_prev)}`, m.m_fish_prev !== null && m.m_fish_prev >= 1.5),
+            radarCell("周收盘乖离30W ≥ +40%", m.close_vs_30w_pct !== null && m.close_vs_30w_pct >= 40.0,
+              `当前乖离 ${fmtV(m.close_vs_30w_pct, "%", 1)} (30W=$${fmtV(m.w_sma30)})`),
+            radarCell("高位激活 & 周Fisher死叉", ls.high_zone_armed && wfCrossDown,
+              `${ls.high_zone_armed ? "高位区已激活" : "未激活"} | WF=${fmtV(m.w_fisher)} vs Sig=${fmtV(m.w_fisher_sig)}`, ls.high_zone_armed),
+          ];
+          const mfOver2 = m.m_fish_prev !== null && m.m_fish_prev >= 2.0;
+          const g2 = [
+            radarCell("假底止损 SL_W25%", ls.sl_price !== null && m.w_close !== null ? m.w_close < ls.sl_price : false,
+              ls.sl_price !== null ? `W_Close $${fmtV(m.w_close)} < 止损 $${fmtV(ls.sl_price)}` : "已脱离未成熟期，SL_W25 失效"),
+            radarCell("M_Fish≥2 后跌破 30周SMA", mfOver2 && m.w_close !== null && m.w_sma30 !== null && m.w_close < m.w_sma30,
+              `W_Close $${fmtV(m.w_close)} vs 30W $${fmtV(m.w_sma30)}`),
+            radarCell("M_Fish≥2 后周回撤 ≥ 35%", mfOver2 && ls.wtsl_price !== null && m.w_close !== null && m.w_close <= ls.wtsl_price,
+              `W_Close $${fmtV(m.w_close)} vs 35%线 $${fmtV(ls.wtsl_price)}`),
+          ];
+          groups.push(renderRadarGroup("出口规则 1 · TP3h 主动高位止盈（前3项激活后，死叉 → 卖出）", g1, "all"));
+          groups.push(renderRadarGroup("出口规则 2 · 假底止损 & X1a 兜底逃顶（任一触发 → 卖出）", g2, "any_exit"));
+        } else {
+          const mfOver2 = m.m_fish_prev !== null && m.m_fish_prev >= 2.0;
+          const g1 = [
+            radarCell("假底止损 SL_W25%", ls.sl_price !== null && m.w_close !== null ? m.w_close < ls.sl_price : false,
+              ls.sl_price !== null ? `W_Close $${fmtV(m.w_close)} < 止损 $${fmtV(ls.sl_price)}` : "已脱离未成熟期，SL_W25 失效"),
+          ];
+          if (stratId === "D1_X1a_WTSL35_Split50" && ls.position_label.includes("50%")) {
+            g1.push(radarCell("补仓: 周收盘 > 10周EMA", m.w_close !== null && m.w_ema10 !== null ? m.w_close > m.w_ema10 : false,
+              `W_Close $${fmtV(m.w_close)} vs 10W_EMA $${fmtV(m.w_ema10)}`));
+          }
+          const g2 = [
+            radarCell("M_Fish≥2 后跌破 30周SMA", mfOver2 && m.w_close !== null && m.w_sma30 !== null && m.w_close < m.w_sma30,
+              `M_Fish=${fmtV(m.m_fish_prev)} | W_Close $${fmtV(m.w_close)} vs 30W $${fmtV(m.w_sma30)}`),
+            radarCell("M_Fish≥2 后周回撤 ≥ 35%", mfOver2 && ls.wtsl_price !== null && m.w_close !== null && m.w_close <= ls.wtsl_price,
+              `W_Close $${fmtV(m.w_close)} vs 35%线 $${fmtV(ls.wtsl_price)}`),
+          ];
+          groups.push(renderRadarGroup("出口规则 1 · 假底保护（未成熟期有效）", g1, "any_exit"));
+          groups.push(renderRadarGroup("出口规则 2 · X1a 大顶逃顶（M_Fish≥2 后任一触发 → 卖出）", g2, "any_exit"));
+        }
+      } else {
+        const useF1 = stratId === "C2_F1_or_MFishLin_TP3h" || stratId === "F1_TP3h";
+        const useC2 = stratId === "C2_F1_or_MFishLin_TP3h";
+        const isSplit = stratId === "D1_X1a_WTSL35_Split50";
+
+        const g1 = [
+          radarCell("200W极值: 8W Low/200W ≤ 1.10", m.min8w_low_200w !== null && m.min8w_low_200w <= 1.10,
+            `当前 ${fmtV(m.min8w_low_200w, "x", 2)} (200W=$${fmtV(m.w_sma200)})`),
+          radarCell("周恐慌: 4W min W_Fish < -1.5", m.min4w_wf !== null && m.min4w_wf < -1.5,
+            `近4周最低 ${fmtV(m.min4w_wf)} (本周 ${fmtV(m.w_fisher)})`),
+          radarCell("放量见底: 4W max 量比 ≥ 1.6x", m.max4w_vol_r !== null && m.max4w_vol_r >= 1.6,
+            `近4周最高 ${fmtV(m.max4w_vol_r, "x")} (本周 ${fmtV(m.w_vol_r, "x")})`),
+        ];
+        if (useF1) {
+          const f1Ok = (m.wks_52h !== null && m.wks_52h >= 30) || (m.dd52_8wl !== null && m.dd52_8wl <= -80.0);
+          g1.push(radarCell("F1门控: 距52W高≥30w 或 跌≤-80%", f1Ok,
+            `当前距高点 ${fmtV(m.wks_52h, "周", 0)} / 8W低回撤 ${fmtV(m.dd52_8wl, "%", 1)}`));
+        }
+        g1.push(radarCell("右侧确认: 周收盘 > 上周高点", m.w_close !== null && m.prev_w_high !== null && m.w_close > m.prev_w_high,
+          `W_Close $${fmtV(m.w_close)} vs 上周高 $${fmtV(m.prev_w_high)}`));
+
+        if (useC2) {
+          const g2 = [
+            radarCell("月线处于低位: M_Fish < 0.8", m.m_fish_prev !== null && m.m_fish_prev < 0.8,
+              `当前 M_Fish=${fmtV(m.m_fish_prev)} (< 0.8 允许触发)`),
+            radarCell("月线金叉: M_Fish 上穿 Signal", m.mf_lin_buy,
+              `M_Fish=${fmtV(m.m_fish_prev)} vs Sig=${fmtV(m.m_fish_sig_prev)}`),
+          ];
+          groups.push(renderRadarGroup("入口规则 1 · F1 主入口（满足全部 5 项 → 买入 100%）", g1, "all"));
+          groups.push(renderRadarGroup("入口规则 2 · 月线 Fisher 金叉兜底（满足全部 2 项 → 买入 100%）", g2, "all"));
+        } else if (isSplit) {
+          const g2 = [
+            radarCell("前置大底: pre_c7_vol 满足", m.pre_c7_vol,
+              `200W=${fmtV(m.min8w_low_200w, "x", 2)} | 4W_WF=${fmtV(m.min4w_wf)} | 量比=${fmtV(m.max4w_vol_r, "x")}`),
+            radarCell("E1 强确认: 周收盘 > 10周EMA", m.w_close !== null && m.w_ema10 !== null && m.w_close > m.w_ema10,
+              `W_Close $${fmtV(m.w_close)} vs 10W_EMA $${fmtV(m.w_ema10)}`),
+          ];
+          groups.push(renderRadarGroup("入口规则 1 · E2 先买50%（满足全部 4 项 → 买入 50%）", g1, "all"));
+          groups.push(renderRadarGroup("入口规则 2 · E1 全仓/补满（满足全部 2 项 → 买入 100%）", g2, "all"));
+        } else {
+          const preCells = g1.slice(0, -1);
+          const trigCells = [g1[g1.length - 1]];
+          groups.push(renderRadarGroup(`入口规则 1 · 前置大底区域 (${useF1 ? "pre_c7_vol + F1门控" : "pre_c7_vol"})`, preCells, "all"));
+          groups.push(renderRadarGroup("入口规则 2 · 右侧触发确认（满足后 → 买入 100%）", trigCells, "all"));
+        }
+      }
+
+      box.innerHTML = `
+        <div class="cockpit-main">
+          <div class="cockpit-meta">${freshHtml}</div>
+          ${actionHtml}
+          ${holdingHtml}
+        </div>
+        <div class="cockpit-radar">
+          <div class="radar-title">
+            <span>${ls && ls.pos_mode !== "FLAT" ? "出口条件雷达 · 持仓退出监控" : "入口条件雷达 · 分组规则监控"}</span>
+            <span>周线基准: ${m.w_date}</span>
+          </div>
+          <div class="radar-groups">${groups.join("")}</div>
+        </div>
+      `;
     }
 
     document.getElementById("logToggle").addEventListener("change", e => {
@@ -1665,22 +2584,137 @@ def render_html(
     weekly_sma: list[dict],
     c7_entries: list[dict],
     strategies: dict[str, dict],
+    live_market: dict | None = None,
 ) -> str:
     """Render standalone HTML with Plotly.js."""
     m_json = json.dumps(monthly, separators=(",", ":"), allow_nan=False)
     w_json = json.dumps(weekly_sma, separators=(",", ":"), allow_nan=False)
     c7_json = json.dumps(c7_entries, separators=(",", ":"), allow_nan=False)
     s_json = json.dumps(strategies, separators=(",", ":"), allow_nan=False, ensure_ascii=False)
+    lm_json = json.dumps(live_market, separators=(",", ":"), allow_nan=False, ensure_ascii=False)
 
     return (
         HTML_TEMPLATE.replace("__MONTHLY_JSON__", m_json)
         .replace("__WEEKLY_SMA_JSON__", w_json)
         .replace("__C7_ENTRIES_JSON__", c7_json)
         .replace("__STRATEGIES_JSON__", s_json)
+        .replace("__LIVE_MARKET_JSON__", lm_json)
     )
 
 
+def format_tg_summary(live_market: dict, strategies: dict[str, dict]) -> str:
+    """Format concise SOXL weekly action summary for Telegram."""
+    m = live_market
+    fr_tag = "" if m["is_friday"] else " [非周五收盘]"
+    lines = [
+        f"SOXL 策略周报 | {m['last_date']} ({m['weekday_cn']}){fr_tag}",
+        f"SOXL: ${m['soxl_close']:.2f} | SMH: ${m['smh_close']:.2f} (200SMA ${m['smh_sma200']:.2f}) | HV20: {m['hv20']:.1f}%",
+        "",
+    ]
+
+    c2 = strategies["C2_F1_or_MFishLin_TP3h"]["live_status"]
+    lines.append(f"★ 主策略 C2+TP3h: {c2['badge']}")
+    if c2["entry_date"]:
+        lines.append(
+            f"• 仓位: {c2['position_label']} | 入场 {c2['entry_date']} @ ${c2['entry_px']:.2f} | 浮盈 {c2['ret_pct']:+.1f}% | {c2['hold_weeks']}周"
+        )
+        lines.append(f"• 说明: {c2['reason']}")
+    else:
+        f1_ok = (m["wks_52h"] is not None and m["wks_52h"] >= 30) or (
+            m["dd52_8wl"] is not None and m["dd52_8wl"] <= -80.0
+        )
+        e1_checks = [
+            ("200W极值", m["min8w_low_200w"] is not None and m["min8w_low_200w"] <= 1.10),
+            ("周恐慌", m["min4w_wf"] is not None and m["min4w_wf"] < -1.5),
+            ("放量1.6x", m["max4w_vol_r"] is not None and m["max4w_vol_r"] >= 1.6),
+            ("F1门控", f1_ok),
+            (f"站上周高(${m['prev_w_high']:.2f})", m["w_close"] is not None and m["prev_w_high"] is not None and m["w_close"] > m["prev_w_high"]),
+        ]
+        e1_done = sum(1 for _, ok in e1_checks if ok)
+        e1_miss = [name for name, ok in e1_checks if not ok]
+        e2_checks = [
+            ("M_Fish<0.8", m["m_fish_prev"] is not None and m["m_fish_prev"] < 0.8),
+            ("月线金叉", bool(m["mf_lin_buy"])),
+        ]
+        e2_done = sum(1 for _, ok in e2_checks if ok)
+        lines.append(f"• 入口1 (F1): {e1_done}/5 满足" + (f" (缺: {', '.join(e1_miss)})" if e1_miss else " (全部满足!)"))
+        lines.append(
+            f"• 入口2 (月Fisher兜底): {e2_done}/2 满足 (M_Fish={m['m_fish_prev']} vs Sig={m['m_fish_sig_prev']})"
+        )
+
+    lines.append("")
+    for key, label in (
+        ("F1_TP3h", "F1+TP3h"),
+        ("D1_X1a_WTSL35", "策略3 (D1)"),
+        ("H5_E2_Promote_S1_AdaptHV", "策略4 (H5)"),
+    ):
+        ls = strategies[key]["live_status"]
+        extra = f" — {ls['reason']}" if ls["action"] in ("BUY", "SELL", "BUY_HALF", "BUY_TOPUP") else ""
+        lines.append(f"• {label}: {ls['badge']}{extra}")
+
+    return "\n".join(lines)
+
+
+def _load_env_file(env_path: Path) -> None:
+    if not env_path.is_file():
+        return
+    for raw in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        v = v.strip().strip('"').strip("'")
+        if k and k not in os.environ:
+            os.environ[k] = v
+
+
+def send_tg_notification(message: str, timeout: int = 10) -> bool:
+    """Send Telegram notification using env/.env or sibling apex/utils/notifier.py."""
+    _load_env_file(ROOT / ".env")
+    _load_env_file(ROOT.parent / "apex" / ".env")
+
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
+    if not token or not chat_id:
+        apex_notifier = ROOT.parent / "apex" / "utils" / "notifier.py"
+        if apex_notifier.is_file():
+            spec = importlib.util.spec_from_file_location("apex_notifier", apex_notifier)
+            if spec and spec.loader:
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                return bool(mod.send_telegram_message(message, timeout=timeout))
+        print("[Telegram] Missing TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID and apex/utils/notifier.py not found.")
+        return False
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    safe_msg = f"<b>[APEXSTOCK]</b>\n{html_lib.escape(message)}"[:4000]
+    data = urllib.parse.urlencode({"chat_id": chat_id, "text": safe_msg, "parse_mode": "HTML"}).encode("utf-8")
+    req = urllib.request.Request(url, data=data)
+
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status == 200:
+                    return True
+        except urllib.error.URLError as e:
+            if hasattr(e, "reason") and isinstance(e.reason, ssl.SSLCertVerificationError):
+                ctx = ssl._create_unverified_context()
+                with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
+                    if resp.status == 200:
+                        return True
+            time.sleep(2 * (attempt + 1))
+        except Exception as e:
+            print(f"[Telegram] Send attempt {attempt + 1} failed: {e}")
+            time.sleep(2 * (attempt + 1))
+    return False
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Build SOXL monthly zones HTML and optional Telegram alert.")
+    parser.add_argument("--notify-tg", action="store_true", help="Send weekly status summary to Telegram.")
+    args = parser.parse_args()
     df_soxl = load_daily_adjusted(DATA_PATH)
     df_smh = load_daily_adjusted(SMH_PATH)
 
@@ -1688,36 +2722,39 @@ def main() -> None:
     c7_entries = detect_c7_vol_entries(df_soxl)
 
     feats = build_causal_features(df_soxl, df_smh)
+    latest_date = str(df_soxl["Date"].max().date())
     c2_tp3h = simulate_tp3h(
         feats,
         use_f1_filter=True,
+        end_date=latest_date,
         entry_col_override="C2_F1_or_MFishLin",
         mode_tag_override="BOT_C2",
         strategy_id="C2_F1_or_MFishLin_TP3h",
     )
-    c2_15yr = simulate_tp3h(
-        feats,
-        use_f1_filter=True,
-        start_date="2011-06-01",
-        end_date=BT_END,
-        entry_col_override="C2_F1_or_MFishLin",
-        mode_tag_override="BOT_C2",
-        strategy_id="C2_F1_or_MFishLin_TP3h",
-    )
-    f1_tp3h = simulate_tp3h(feats, use_f1_filter=True)
-    f0_tp3h = simulate_tp3h(feats, use_f1_filter=False)
-    d1_full = simulate_d1_x1a_wtsl35(feats, use_split_50_50=False)
-    d1_split = simulate_d1_x1a_wtsl35(feats, use_split_50_50=True)
-    h5 = simulate_h5_adapt_hv(feats)
+    f1_tp3h = simulate_tp3h(feats, use_f1_filter=True, end_date=latest_date)
+    f0_tp3h = simulate_tp3h(feats, use_f1_filter=False, end_date=latest_date)
+    d1_full = simulate_d1_x1a_wtsl35(feats, use_split_50_50=False, end_date=latest_date)
+    d1_split = simulate_d1_x1a_wtsl35(feats, use_split_50_50=True, end_date=latest_date)
+    h5 = simulate_h5_adapt_hv(feats, end_date=latest_date)
 
-    assert len(c7_entries) == 5, f"Expected 5 C7_Vol entries, got {len(c7_entries)}"
-    assert c2_tp3h["stats"]["trades"] == 5 and abs(c2_tp3h["stats"]["final"] - 99311369.63) < 1.0, c2_tp3h["stats"]
-    assert c2_15yr["stats"]["trades"] == 7 and abs(c2_15yr["stats"]["final"] - 182231668.40) < 1.0, c2_15yr["stats"]
-    assert f1_tp3h["stats"]["trades"] == 5 and abs(f1_tp3h["stats"]["final"] - 99311369.63) < 1.0 and f1_tp3h["stats"]["win_rate"] == 100.0, f1_tp3h["stats"]
-    assert f0_tp3h["stats"]["trades"] == 6 and abs(f0_tp3h["stats"]["final"] - 66812281.30) < 1.0 and f0_tp3h["stats"]["win_rate"] == 83.3, f0_tp3h["stats"]
-    assert d1_full["stats"]["trades"] == 6 and abs(d1_full["stats"]["final"] - 38035375.82) < 1.0, d1_full["stats"]
-    assert d1_split["stats"]["trades"] == 6 and abs(d1_split["stats"]["final"] - 30120328.33) < 1.0, d1_split["stats"]
-    assert h5["stats"]["trades"] == 32 and abs(h5["stats"]["final"] - 37913860.48) < 1.0, h5["stats"]
+    if latest_date == BT_END:
+        c2_15yr = simulate_tp3h(
+            feats,
+            use_f1_filter=True,
+            start_date="2011-06-01",
+            end_date=BT_END,
+            entry_col_override="C2_F1_or_MFishLin",
+            mode_tag_override="BOT_C2",
+            strategy_id="C2_F1_or_MFishLin_TP3h",
+        )
+        assert len(c7_entries) == 5, f"Expected 5 C7_Vol entries, got {len(c7_entries)}"
+        assert c2_tp3h["stats"]["trades"] == 5 and abs(c2_tp3h["stats"]["final"] - 99311369.63) < 1.0, c2_tp3h["stats"]
+        assert c2_15yr["stats"]["trades"] == 7 and abs(c2_15yr["stats"]["final"] - 182231668.40) < 1.0, c2_15yr["stats"]
+        assert f1_tp3h["stats"]["trades"] == 5 and abs(f1_tp3h["stats"]["final"] - 99311369.63) < 1.0 and f1_tp3h["stats"]["win_rate"] == 100.0, f1_tp3h["stats"]
+        assert f0_tp3h["stats"]["trades"] == 6 and abs(f0_tp3h["stats"]["final"] - 66812281.30) < 1.0 and f0_tp3h["stats"]["win_rate"] == 83.3, f0_tp3h["stats"]
+        assert d1_full["stats"]["trades"] == 6 and abs(d1_full["stats"]["final"] - 38035375.82) < 1.0, d1_full["stats"]
+        assert d1_split["stats"]["trades"] == 6 and abs(d1_split["stats"]["final"] - 30120328.33) < 1.0, d1_split["stats"]
+        assert h5["stats"]["trades"] == 32 and abs(h5["stats"]["final"] - 37913860.48) < 1.0, h5["stats"]
 
     strategies = {
         "C2_F1_or_MFishLin_TP3h": c2_tp3h,
@@ -1734,9 +2771,15 @@ def main() -> None:
             f"[{key}] Final=${st['final']:,.2f} | CAGR={st['cagr']}% | MaxDD={st['max_dd']}% | Calmar={st['calmar']} | Trades={st['trades']} | WinRate={st['win_rate']}%"
         )
 
-    html = render_html(monthly, weekly_sma, c7_entries, strategies)
+    live_market = build_live_market_snapshot(feats)
+    html = render_html(monthly, weekly_sma, c7_entries, strategies, live_market=live_market)
     OUTPUT_HTML.write_text(html, encoding="utf-8")
     print(f"Generated {OUTPUT_HTML} ({len(monthly)} monthly bars)")
+
+    if args.notify_tg:
+        tg_msg = format_tg_summary(live_market, strategies)
+        ok = send_tg_notification(tg_msg)
+        print(f"[Telegram] sent={ok}")
 
 
 if __name__ == "__main__":
