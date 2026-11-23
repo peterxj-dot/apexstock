@@ -2,9 +2,9 @@
 
 ## 1. 项目目录结构与核心约定
 
-- `data/`：本地日线 CSV 数据（`QQQ.csv`、`TQQQ.csv`、`SMH.csv`、`SOXL.csv`，2010 年起），由 `tools/download_data.py` 基于 `tools/tickers.json` 增量维护，自动过滤含空值的不完整交易日。
+- `data/`：本地日线 CSV 数据（`QQQ.csv`、`TQQQ.csv`、`SMH.csv`、`SOXL.csv` 2010 年起；`BTC-USD.csv` 2014-09-17 起），由 `tools/download_data.py` 基于 `tools/tickers.json` 增量维护，自动过滤含空值的不完整交易日。
 - `indicators/`：技术指标包（`sma`、`ema`、`macd`、`bollinger_bands`、`rsi`、`fisher_transform`、`atr`、`historical_volatility`）。
-- `tools/`：数据下载与可视化生成脚本（`build_chart.py` -> `chart.html`；`build_soxl_zones.py` -> `soxl_monthly_zones.html`）。
+- `tools/`：数据下载、可视化生成与自动更新脚本（`build_chart.py` -> `chart.html`；`build_soxl_zones.py` -> `soxl_monthly_zones.html`；`build_tqqq_zones.py` -> `tqqq_monthly_zones.html`；`build_btc_zones.py` -> `btc_monthly_zones.html`；`weekly_update.sh` 美股周更；`daily_btc_update.sh` + `com.apexstock.daily_btc_update.plist` BTC UTC 日更）。
 - `tmp/`：策略扫描、验证脚本与中间结果 CSV（`scan_soxl_strategies.py`、`scan_soxl_v2_lowdd.py`、`scan_paired_entry_exit.py`、`scan_exit_conditioned_reentry.py`、`validate_oos_and_tqqq.py`、`improve_bottom_timing.py`、`study_major_exits_and_backtest.py`、`test_cycle_v2_and_hybrid.py`、`test_bottom_filter_and_tp_exits.py`）。
 
 ### 回测防作弊规范（严格因果执行）
@@ -103,3 +103,34 @@
 - **去分红调整原始价 (`Raw Close`, 2015–2025)**：策略 1 `$11,033,764.37`（`CAGR 89.33%`, `MaxDD -54.20%`, `34` 笔）；策略 2 `$13,437,825.20`（`CAGR 92.76%`, `MaxDD -53.22%`, `39` 笔）。
 - **验证脚本与图表生成入口**：[validate_oos_and_tqqq.py](tmp/validate_oos_and_tqqq.py)、[scan_exit_conditioned_reentry.py](tmp/scan_exit_conditioned_reentry.py)、[test_cycle_v2_and_hybrid.py](tmp/test_cycle_v2_and_hybrid.py)、[test_bottom_filter_and_tp_exits.py](tmp/test_bottom_filter_and_tp_exits.py)、[improve_tp3h_and_robustness.py](tmp/improve_tp3h_and_robustness.py)、[simulate_synthetic_soxl.py](tmp/simulate_synthetic_soxl.py)、[audit_f1_missed_bottoms.py](tmp/audit_f1_missed_bottoms.py)、[study_r3_r4_hybrids.py](tmp/study_r3_r4_hybrids.py)、[sweep_volume_gate.py](tmp/sweep_volume_gate.py)、[build_soxl_zones.py](tools/build_soxl_zones.py)。
 - **参数适用注意**：`HV20 > 115%` 阈值是针对高波动 `SOXL` 标定；跨标的应用于低波 ETF（如 `TQQQ`）时，日常震荡不一定触发 115% 波动率刹车，此时策略 2 的 `30%` 追踪止损提供了额外回撤保护。
+
+---
+
+## 4. BTC 减半周期与波动率策略（7×24 UTC 日更）
+
+- **数据与回测基准**：`BTC-USD.csv`（`2014-09-17 ~ 2026-11-23`），年化按 `365` 天计，双边 `0.05%` 手续费，当日 UTC 收盘触发信号、次日 `Open` 成交。
+- **减半锚点**：`2016-07-09`、`2020-05-11`、`2024-04-20`、预计下一轮 `2028-04-10`。
+- **波动率比值指标**：`HV_Ratio = HV20 / HV60`（用于识别恐慌脉冲与冷却拐点）。
+
+### 4.1 已验证的四套 BTC 策略
+
+1. **`BTC_Halv_HV_Combo`（当前默认旗舰：减半窗 + `HV_Ratio` 共振）**
+   - **买点区 `[H-540 ~ H-460]`**：先等待近 35 日内出现恐慌脉冲 `HV_Ratio ≥ 1.30`，随后在 `HV_Ratio < 1.0` 冷却时买入（若临近窗口末尾仍未冷却，则 `H-490` 兜底买入）。
+   - **卖点区 `[H+480 ~ H+560]`**：在窗口内出现高位脉冲 `HV_Ratio ≥ 1.30` 时主动逃顶（若未出现，则 `H+540` 时间兜底卖出）；其余时间空仓避开熊市。
+   - **历史 3 笔全胜明细**：`2015-02-05 @ $227.66 -> 2017-12-12 @ $16,919.80 (+7,324.5%)`、`2018-12-19 @ $3,706.82 -> 2021-11-03 @ $63,254.34 (+1,604.7%)`、`2022-11-30 @ $16,445.48 -> 2025-10-13 @ $115,161.68 (+599.6%)`。
+2. **`BTC_Pure_Halv_500_530`**：固定减半前 `500` 天买入、减半后 `530` 天卖出。
+3. **`BTC_Phase_Halv_SMA150`**：四阶段策略（筑底 `[H-520~-200]` 死拿 + 爬坡 `[H-200~+250]` `SMA150` & `HV≤95%` + 冲顶 `[H+250~+535]` `SMA150×0.95` + 熊市空仓）。
+4. **`BTC_Daily_GAC_10_2_15`**：仅在减半牛市窗 `[H-500~+530]` 内交易，突破日线高斯通道 `GAC(10,2,1.5)` 上轨买入、跌破中轨卖出。
+
+### 4.2 回测指标汇总（`2014-09-17 ~ 2026-11-23`，初始 `$10,000`）
+
+| 策略 | Final ($) | CAGR | MaxDD | Calmar | Trades / WinRate |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **`BTC_Halv_HV_Combo`** *(默认)* | **`$88,541,225.70`** | **`114.57%`** | `-61.81%` | `1.854` | `3` / **`100.0%`** |
+| `BTC_Pure_Halv_500_530` | `$74,639,941.58` | `111.52%` | `-61.81%` | `1.804` | `3` / `100.0%` |
+| `BTC_Phase_Halv_SMA150` | `$36,710,997.15` | `99.28%` | `-49.59%` | `2.002` | `23` / `52.2%` |
+| `BTC_Daily_GAC_10_2_15` | `$7,275,905.20` | `73.94%` | **`-36.24%`** | **`2.04`** | `37` / `75.7%` |
+
+### 4.3 每日自动化与可视化入口
+- **图表生成**：[build_btc_zones.py](tools/build_btc_zones.py) -> [btc_monthly_zones.html](btc_monthly_zones.html)（标识绿色 `买点区 (H-540~-460)`、红色 `卖点区 (H+480~+560)` 及实盘雷达；支持 `--notify-tg`）。
+- **UTC 每日自动更新**：[daily_btc_update.sh](tools/daily_btc_update.sh)（每日 `00:15 UTC` / `09:15 JST` 后自动拉取 `BTC-USD`、重生成图表并推送 Telegram，按 `logs/last_daily_btc_run_utc_date.txt` 去重），由 `~/Library/LaunchAgents/com.apexstock.daily_btc_update.plist`（模板位于 [com.apexstock.daily_btc_update.plist](tools/com.apexstock.daily_btc_update.plist)）每小时唤醒检查。
