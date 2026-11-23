@@ -998,6 +998,7 @@ def simulate_tp3h(
     entry_col_override: str | None = None,
     mode_tag_override: str | None = None,
     strategy_id: str | None = None,
+    tp_split_lottery_pct: float = 0.0,
 ) -> dict:
     """Simulate upgraded Strategy 3 with proactive high-zone TP3h (with or without F1 SOXL anti-fake-bottom filter)."""
     daily_df = feats["daily"]
@@ -1012,16 +1013,23 @@ def simulate_tp3h(
     entry_col = entry_col_override or ("F1_E2_PrevHigh" if use_f1_filter else "E2_PrevHigh")
     mode_tag = mode_tag_override or ("BOT_F1" if use_f1_filter else "BOT_E2")
     opens = daily_df["Open"].to_numpy(dtype=np.float64)
+    highs = daily_df["High"].to_numpy(dtype=np.float64)
     closes = daily_df["Close"].to_numpy(dtype=np.float64)
 
     cash = INITIAL_CAPITAL
     shares = 0.0
+    trade_cash_start = INITIAL_CAPITAL
     avg_entry_px = 0.0
     entry_date_str = ""
     entry_m_str = ""
     entry_fill_pos = -1
     entry_sig_w_pos = -1
     high_zone_armed = False
+
+    lot_active = False
+    lot_px = 0.0
+    lot_exp_pos = -1
+    lot_first_leg_px = 0.0
 
     peak_d_close = 0.0
     peak_w_close = 0.0
@@ -1036,12 +1044,14 @@ def simulate_tp3h(
 
     for step, pos in enumerate(range(i_start, i_end + 1)):
         o = opens[pos]
+        h = highs[pos]
         c = closes[pos]
         dt_str = idx[pos].strftime("%Y-%m-%d")
         m_str = idx[pos].strftime("%Y-%m")
 
         just_exited = False
         if pending_action == "BUY" and shares == 0:
+            trade_cash_start = cash
             shares = (cash * (1.0 - FEE_RATE)) / o
             cash = 0.0
             avg_entry_px = float(o)
@@ -1050,39 +1060,81 @@ def simulate_tp3h(
             entry_fill_pos = pos
             entry_sig_w_pos = pending_sig_w_pos
             high_zone_armed = False
+            lot_active = False
             peak_d_close = c
             peak_w_close = 0.0
         elif pending_action == "SELL" and shares > 0:
             if pos <= entry_fill_pos:
                 raise AssertionError(f"Same-day buy-sell at {dt_str}")
-            proceeds = shares * o * (1.0 - FEE_RATE)
-            ret_pct = ((o * (1.0 - FEE_RATE)) / (avg_entry_px * (1.0 + FEE_RATE)) - 1.0) * 100.0
-            trades.append(
-                {
-                    "mode": mode_tag,
-                    "entry_date": entry_date_str,
-                    "entry_m": entry_m_str,
-                    "tranche2_date": "-",
-                    "tranche2_m": None,
-                    "tranche2_px": None,
-                    "entry_px": round(avg_entry_px, 2),
-                    "avg_entry_px": round(avg_entry_px, 2),
-                    "exit_date": dt_str,
-                    "exit_m": m_str,
-                    "exit_px": round(float(o), 2),
-                    "ret_pct": round(float(ret_pct), 1),
-                    "exit_reason": pending_reason,
-                    "is_open": False,
-                }
-            )
-            if pending_reason.startswith("SL_"):
-                cooldown_until_pos = pos + 10
-            cash = proceeds
-            shares = 0.0
-            avg_entry_px = 0.0
-            just_exited = True
+            if tp_split_lottery_pct > 0.0 and pending_reason == "HighStr40&WFish<Sig":
+                sell_sh = shares * 0.5
+                cash += sell_sh * o * (1.0 - FEE_RATE)
+                shares -= sell_sh
+                lot_active = True
+                lot_px = float(o) * (1.0 + tp_split_lottery_pct)
+                lot_exp_pos = pos + 4
+                lot_first_leg_px = float(o)
+            else:
+                proceeds = shares * o * (1.0 - FEE_RATE)
+                ret_pct = ((o * (1.0 - FEE_RATE)) / (avg_entry_px * (1.0 + FEE_RATE)) - 1.0) * 100.0
+                trades.append(
+                    {
+                        "mode": mode_tag,
+                        "entry_date": entry_date_str,
+                        "entry_m": entry_m_str,
+                        "tranche2_date": "-",
+                        "tranche2_m": None,
+                        "tranche2_px": None,
+                        "entry_px": round(avg_entry_px, 2),
+                        "avg_entry_px": round(avg_entry_px, 2),
+                        "exit_date": dt_str,
+                        "exit_m": m_str,
+                        "exit_px": round(float(o), 2),
+                        "ret_pct": round(float(ret_pct), 1),
+                        "exit_reason": pending_reason,
+                        "is_open": False,
+                    }
+                )
+                if pending_reason.startswith("SL_"):
+                    cooldown_until_pos = pos + 10
+                cash = proceeds
+                shares = 0.0
+                avg_entry_px = 0.0
+                just_exited = True
         pending_action = ""
         pending_reason = ""
+
+        if lot_active and shares > 0:
+            hit_lot = h >= lot_px
+            if hit_lot or pos >= lot_exp_pos:
+                fill_px = max(float(o), lot_px) if hit_lot else float(c)
+                cash += shares * fill_px * (1.0 - FEE_RATE)
+                ret_pct = (cash / trade_cash_start - 1.0) * 100.0
+                avg_exit_px = 0.5 * lot_first_leg_px + 0.5 * fill_px
+                exit_tag = f"TP3h_50%+10%({'中奖' if hit_lot else '5日兜底'})"
+                trades.append(
+                    {
+                        "mode": mode_tag,
+                        "entry_date": entry_date_str,
+                        "entry_m": entry_m_str,
+                        "tranche2_date": "-",
+                        "tranche2_m": None,
+                        "tranche2_px": None,
+                        "entry_px": round(avg_entry_px, 2),
+                        "avg_entry_px": round(avg_entry_px, 2),
+                        "exit_date": dt_str,
+                        "exit_m": m_str,
+                        "exit_px": round(avg_exit_px, 2),
+                        "ret_pct": round(float(ret_pct), 1),
+                        "exit_reason": exit_tag,
+                        "is_open": False,
+                    }
+                )
+                shares = 0.0
+                avg_entry_px = 0.0
+                lot_active = False
+                high_zone_armed = False
+                just_exited = True
 
         equity[step] = cash + shares * c
         if shares > 0:
@@ -1096,7 +1148,7 @@ def simulate_tp3h(
         w_pos = week_end_daily_pos[pos]
         w_row = w_df.iloc[w_pos]
 
-        if shares > 0:
+        if shares > 0 and not lot_active:
             wc = float(w_row["Close"])
             if wc > peak_w_close:
                 peak_w_close = wc
@@ -1127,7 +1179,7 @@ def simulate_tp3h(
                         pending_action = "SELL"
                         pending_reason = "M>=2&WTSL35%"
 
-        elif not just_exited and pos >= cooldown_until_pos:
+        elif not lot_active and not just_exited and pos >= cooldown_until_pos:
             if bool(w_row[entry_col]):
                 pending_action = "BUY"
                 pending_sig_w_pos = w_pos
@@ -1174,7 +1226,14 @@ def simulate_tp3h(
             "hold",
             f"已持仓 {hold_w_live} 周，" + ("高位止盈区已激活，等待周Fisher死叉" if armed_live else "等待高位止盈区激活 (50w+M_Fish≥2+30W≥40%)"),
         )
-        if unmatured_live and wc_live < avg_entry_px * 0.75:
+        if lot_active:
+            live_act, live_badge, live_tone, live_reason = (
+                "SELL",
+                "挂单止盈中 (剩50%)",
+                "sell",
+                f"已于开盘卖出50% (@ ${lot_first_leg_px:.2f})，剩余50%挂限价 ${lot_px:.2f} (+{int(tp_split_lottery_pct*100)}%)，第5交易日收盘兜底全平",
+            )
+        elif unmatured_live and wc_live < avg_entry_px * 0.75:
             live_act, live_badge, live_tone, live_reason = (
                 "SELL",
                 "卖出 (假底止损)",
@@ -1188,12 +1247,20 @@ def simulate_tp3h(
                 and pd.notna(w_live["W_Fisher_Sig"])
                 and float(w_live["W_Fisher"]) < float(w_live["W_Fisher_Sig"])
             ):
-                live_act, live_badge, live_tone, live_reason = (
-                    "SELL",
-                    "卖出 (TP3h高位止盈)",
-                    "sell",
-                    f"高位区已激活且周 Fisher ({float(w_live['W_Fisher']):.2f}) < Signal ({float(w_live['W_Fisher_Sig']):.2f})",
-                )
+                if tp_split_lottery_pct > 0.0:
+                    live_act, live_badge, live_tone, live_reason = (
+                        "SELL",
+                        f"卖出 (TP3h: 开盘50%+挂+{int(tp_split_lottery_pct*100)}%)",
+                        "sell",
+                        f"高位区已激活且周 Fisher ({float(w_live['W_Fisher']):.2f}) < Sig ({float(w_live['W_Fisher_Sig']):.2f})：下个交易日开盘卖50%，剩50%挂+{int(tp_split_lottery_pct*100)}%限价（5日兜底）",
+                    )
+                else:
+                    live_act, live_badge, live_tone, live_reason = (
+                        "SELL",
+                        "卖出 (TP3h高位止盈)",
+                        "sell",
+                        f"高位区已激活且周 Fisher ({float(w_live['W_Fisher']):.2f}) < Signal ({float(w_live['W_Fisher_Sig']):.2f})",
+                    )
             elif pd.notna(mf_live) and float(mf_live) >= 2.0:
                 if pd.notna(vs30_live) and float(vs30_live) < 0.0:
                     live_act, live_badge, live_tone, live_reason = (
@@ -1214,7 +1281,7 @@ def simulate_tp3h(
             "action": live_act,
             "badge": live_badge,
             "tone": live_tone,
-            "position_label": f"持仓 100% ({mode_tag})",
+            "position_label": f"持仓 {'50% (TP3h挂单止盈中)' if lot_active else '100%'} ({mode_tag})",
             "pos_mode": "BOT",
             "entry_date": entry_date_str,
             "entry_px": round(avg_entry_px, 2),
@@ -1261,9 +1328,9 @@ def simulate_tp3h(
     if strategy_id == "C2_F1_or_MFishLin_TP3h":
         return {
             "id": "C2_F1_or_MFishLin_TP3h",
-            "name": "SOXL 高容错旗舰: C2+Deep85_HL+TP3h (12年$1.43亿 / 15.5年$2.62亿)",
-            "short_label": "SOXL高容错旗舰 (C2+Deep85_HL+TP3h)",
-            "rule_desc": "三入口: F1主入口 | Deep85+周HigherLow | 月Fisher<0.8金叉兜底 || 出口: 50w&M_Fish≥2&30W≥40%周Fisher死叉止盈 (X1a+SL_W25兜底)",
+            "name": "SOXL 高容错旗舰: C2+Deep85_HL+TP3h(50%+10%) (12年$1.61亿 / 15.5年$2.89亿)",
+            "short_label": "SOXL高容错旗舰 (C2+Deep85_HL+TP3h分批)",
+            "rule_desc": "三入口: F1主入口 | Deep85+周HigherLow | 月Fisher<0.8金叉兜底 || 出口: TP3h触发开盘卖50%+剩50%挂+10%(5日兜底) (X1a+SL_W25兜底)",
             "stats": stats,
             "trades": trades,
             "live_status": live_status,
@@ -1773,7 +1840,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div class="group">
       <span class="group-label">策略标注</span>
       <select id="strategySelect" class="strategy-select">
-        <option value="C2_F1_or_MFishLin_TP3h" selected>SOXL高容错旗舰: C2+Deep85_HL+TP3h (12年$1.43亿 / 15.5年$2.62亿, 0踏空)</option>
+        <option value="C2_F1_or_MFishLin_TP3h" selected>SOXL高容错旗舰: C2+Deep85_HL+TP3h(50%+10%) (12年$1.61亿 / 15.5年$2.89亿, 0踏空)</option>
         <option value="F1_TP3h">SOXL极致大周期: F1+TP3h (5笔全胜, 12年$9931万, 回撤-49.0%)</option>
         <option value="F0_TP3h">通用大周期止盈: F0+TP3h (6笔, 12年$6681万, 回撤-49.0%)</option>
         <option value="D1_X1a_WTSL35">策略3 极简大周期: D1_X1a_WTSL35 (6笔, 12年$3804万)</option>
@@ -2757,6 +2824,7 @@ def main() -> None:
         entry_col_override="C2_Deep85HL",
         mode_tag_override="BOT_C2",
         strategy_id="C2_F1_or_MFishLin_TP3h",
+        tp_split_lottery_pct=0.10,
     )
     f1_tp3h = simulate_tp3h(feats, use_f1_filter=True, end_date=latest_date)
     f0_tp3h = simulate_tp3h(feats, use_f1_filter=False, end_date=latest_date)
