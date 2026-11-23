@@ -138,6 +138,12 @@ def main() -> None:
         action="store_true",
         help="Re-download full history from start_date instead of incremental update.",
     )
+    parser.add_argument(
+        "--tickers",
+        type=str,
+        default="",
+        help="Optional comma-separated tickers to update (default: all tickers in config).",
+    )
     args = parser.parse_args()
 
     config_path = args.config.resolve()
@@ -146,7 +152,11 @@ def main() -> None:
     output_dir = resolve_data_dir(config_path, config.get("data_dir"))
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    for ticker in config["tickers"]:
+    target_tickers = config["tickers"]
+    if args.tickers.strip():
+        target_tickers = [t.strip() for t in args.tickers.split(",") if t.strip()]
+
+    for ticker in target_tickers:
         ticker_clean = str(ticker).strip().upper()
         if not ticker_clean:
             continue
