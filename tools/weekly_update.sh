@@ -50,6 +50,7 @@ fi
   "$PYTHON_BIN" "$ROOT/tools/download_data.py"
   "$PYTHON_BIN" "$ROOT/tools/build_soxl_zones.py" --notify-tg
   "$PYTHON_BIN" "$ROOT/tools/build_tqqq_zones.py"
+  "$PYTHON_BIN" "$ROOT/tools/build_tecl_zones.py"
   echo "$MARKET_WEEK" > "$STAMP_FILE"
   echo "[DONE] Marked $MARKET_WEEK complete at $(date '+%Y-%m-%d %H:%M:%S %Z')"
 } >> "$LOG_FILE" 2>&1

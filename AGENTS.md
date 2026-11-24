@@ -2,9 +2,9 @@
 
 ## 1. 项目目录结构与核心约定
 
-- `data/`：本地日线 CSV 数据（`QQQ.csv`、`TQQQ.csv`、`SMH.csv`、`SOXL.csv`、`MSTR.csv` 2010 年起；`BTC-USD.csv` 2014-09-17 起），由 `tools/download_data.py` 基于 `tools/tickers.json` 增量维护，自动过滤含空值的不完整交易日。
+- `data/`：本地日线 CSV 数据（`QQQ.csv`、`TQQQ.csv`、`SMH.csv`、`SOXL.csv`、`TECL.csv`、`MSTR.csv` 2010 年起；`BTC-USD.csv` 2014-09-17 起），由 `tools/download_data.py` 基于 `tools/tickers.json` 增量维护，自动过滤含空值的不完整交易日。
 - `indicators/`：技术指标包（`sma`、`ema`、`macd`、`bollinger_bands`、`rsi`、`fisher_transform`、`atr`、`historical_volatility`）。
-- `tools/`：数据下载、可视化生成与自动更新脚本（`build_chart.py` -> `chart.html`；`build_soxl_zones.py` -> `soxl_monthly_zones.html`；`build_tqqq_zones.py` -> `tqqq_monthly_zones.html`；`build_btc_zones.py` -> `btc_monthly_zones.html`；`build_mstr_zones.py` -> `mstr_monthly_zones.html`；`weekly_update.sh` 美股周更；`daily_btc_update.sh` + `com.apexstock.daily_btc_update.plist` BTC & MSTR 日更）。
+- `tools/`：数据下载、可视化生成与自动更新脚本（`build_chart.py` -> `chart.html`；`build_soxl_zones.py` -> `soxl_monthly_zones.html`；`build_tqqq_zones.py` -> `tqqq_monthly_zones.html`；`build_tecl_zones.py` -> `tecl_monthly_zones.html`；`build_btc_zones.py` -> `btc_monthly_zones.html`；`build_mstr_zones.py` -> `mstr_monthly_zones.html`；`weekly_update.sh` 美股周更；`daily_btc_update.sh` + `com.apexstock.daily_btc_update.plist` BTC & MSTR 日更）。
 - `tmp/`：策略扫描、验证脚本与中间结果 CSV（`scan_soxl_strategies.py`、`scan_soxl_v2_lowdd.py`、`scan_paired_entry_exit.py`、`scan_exit_conditioned_reentry.py`、`validate_oos_and_tqqq.py`、`improve_bottom_timing.py`、`study_major_exits_and_backtest.py`、`test_cycle_v2_and_hybrid.py`、`test_bottom_filter_and_tp_exits.py`）。
 
 ### 回测防作弊规范（严格因果执行）
@@ -161,3 +161,14 @@
 | `Buy & Hold (MSTR)` | `$58,983.22` | `29.44%` | `-89.27%` | `0.330` | `1` / `100.0%` |
 
 - **可视化与自动更新**：[build_mstr_zones.py](tools/build_mstr_zones.py) -> [mstr_monthly_zones.html](mstr_monthly_zones.html)（支持 `--notify-tg`，已接入 [daily_btc_update.sh](tools/daily_btc_update.sh) 每日自动更新并推送 Telegram；策略与动量/成交量验证脚本位于 `tmp/study_mstr_strategies.py`、`tmp/study_mstr_hybrids.py`、`tmp/study_mstr_momentum.py`、`tmp/study_mstr_volume.py`）。
+
+---
+
+## 6. 跨标的对比：SOXL 信号驱动 `TQQQ` vs `TECL`（`2015-01-02 ~ 2026-11-23`）
+
+- **结论**：在 2015 年以来的科技周期中，用 **SOXL 信号买卖 `TECL` 全面优于买卖 `TQQQ`**（因 `TECL` 标普科技板块中半导体与硬科技权重显著高于纳指 `TQQQ`），且 12 年最大回撤反而更低。
+- **12 年全周期表现（初始 `$10,000`，双边 `0.05%` 费率，[compare_soxl_to_tqqq_tecl.py](tmp/compare_soxl_to_tqqq_tecl.py)）**：
+  - **`H5_AdaptHV`**：`TECL` **`$10,899,609.29`**（`CAGR 80.26%`, `MaxDD -43.78%`, `Calmar 1.833`, `33` 笔/`72.7%`）vs `TQQQ` `$7,001,182.46`（`CAGR 73.67%`, `MaxDD -46.68%`, `Calmar 1.578`）。
+  - **`C2_Deep85HL_TP3h`**：`TECL` **`$7,839,527.18`**（`CAGR 75.33%`, `MaxDD -46.58%`, `Calmar 1.617`, `5` 战 `100%`）vs `TQQQ` `$3,314,075.25`（`CAGR 63.06%`, `MaxDD -36.97%`）。
+  - **`Buy & Hold`**：`TECL` `$362,872.98`（`MaxDD -77.96%`）vs `TQQQ` `$252,015.65`（`MaxDD -81.66%`）。
+- **图表入口**：[build_tecl_zones.py](tools/build_tecl_zones.py) -> [tecl_monthly_zones.html](tecl_monthly_zones.html)（已接入 [weekly_update.sh](tools/weekly_update.sh) 周更流程）。
