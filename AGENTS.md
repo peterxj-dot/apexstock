@@ -2,9 +2,9 @@
 
 ## 1. 项目目录结构与核心约定
 
-- `data/`：本地日线 CSV 数据（`QQQ.csv`、`TQQQ.csv`、`SMH.csv`、`SOXL.csv`、`TECL.csv`、`MSTR.csv` 2010 年起；`BTC-USD.csv` 2014-09-17 起），由 `tools/download_data.py` 基于 `tools/tickers.json` 增量维护，自动过滤含空值的不完整交易日。
+- `data/`：本地日线 CSV 数据（`QQQ.csv`、`TQQQ.csv`、`SMH.csv`、`SOXL.csv`、`TECL.csv`、`VGT.csv`、`MSTR.csv` 2010 年起；`BTC-USD.csv` 2014-09-17 起），由 `tools/download_data.py` 基于 `tools/tickers.json` 增量维护，自动过滤含空值的不完整交易日。
 - `indicators/`：技术指标包（`sma`、`ema`、`macd`、`bollinger_bands`、`rsi`、`fisher_transform`、`atr`、`historical_volatility`）。
-- `tools/`：数据下载、可视化生成与自动更新脚本（`build_chart.py` -> `chart.html`；`build_soxl_zones.py` -> `soxl_monthly_zones.html`；`build_tqqq_zones.py` -> `tqqq_monthly_zones.html`；`build_tecl_zones.py` -> `tecl_monthly_zones.html`；`build_btc_zones.py` -> `btc_monthly_zones.html`；`build_mstr_zones.py` -> `mstr_monthly_zones.html`；`weekly_update.sh` 美股周更；`daily_btc_update.sh` + `com.apexstock.daily_btc_update.plist` BTC & MSTR 日更）。
+- `tools/`：数据下载、可视化生成与自动更新脚本（`build_chart.py` -> `chart.html`；`build_soxl_zones.py` -> `soxl_monthly_zones.html`；`build_tqqq_zones.py` -> `tqqq_monthly_zones.html`；`build_tecl_zones.py` -> `tecl_monthly_zones.html`；`build_vgt_margin_compare.py` -> `vgt_margin_comparison.html`；`build_btc_zones.py` -> `btc_monthly_zones.html`；`build_mstr_zones.py` -> `mstr_monthly_zones.html`；`weekly_update.sh` 美股周更；`daily_btc_update.sh` + `com.apexstock.daily_btc_update.plist` BTC & MSTR 日更）。
 - `tmp/`：策略扫描、验证脚本与中间结果 CSV（`scan_soxl_strategies.py`、`scan_soxl_v2_lowdd.py`、`scan_paired_entry_exit.py`、`scan_exit_conditioned_reentry.py`、`validate_oos_and_tqqq.py`、`improve_bottom_timing.py`、`study_major_exits_and_backtest.py`、`test_cycle_v2_and_hybrid.py`、`test_bottom_filter_and_tp_exits.py`）。
 
 ### 回测防作弊规范（严格因果执行）
@@ -172,3 +172,17 @@
   - **`C2_Deep85HL_TP3h`**：`TECL` **`$7,839,527.18`**（`CAGR 75.33%`, `MaxDD -46.58%`, `Calmar 1.617`, `5` 战 `100%`）vs `TQQQ` `$3,314,075.25`（`CAGR 63.06%`, `MaxDD -36.97%`）。
   - **`Buy & Hold`**：`TECL` `$362,872.98`（`MaxDD -77.96%`）vs `TQQQ` `$252,015.65`（`MaxDD -81.66%`）。
 - **图表入口**：[build_tecl_zones.py](tools/build_tecl_zones.py) -> [tecl_monthly_zones.html](tecl_monthly_zones.html)（已接入 [weekly_update.sh](tools/weekly_update.sh) 周更流程）。
+
+---
+
+## 7. VGT 现货与 `20% / 30% / 40%` 融资组合对比（SOXL 信号驱动，`2015-01-02 ~ 2026-11-23`）
+
+- **回测口径**：初始 `$10,000`，严格因果次日 `Open` 成交，双边 `0.05%` 手续费；持仓期维持 `100% VGT + 融资 20%/30%/40% 买入 TECL/TQQQ`，融资部分按**年化 `6.5%` 每日计息**（空仓期 `0` 利息）。
+- **SOXL `H5` 信号引擎对比结果**：
+  - **`VGT + 40% TECL (融资)`**：`$2,300,839.97`（`CAGR 58.12%`, `MaxDD -35.26%`, `Calmar 1.648`, `WorstYr +3.3%`, `最大负债率 32.87%`, `Int $60,558`）
+  - **`VGT + 30% TECL (融资)`** *(黄金均衡档)*：`$1,309,317.30`（`CAGR 50.79%`, `MaxDD -31.56%`, `Calmar 1.609`, `WorstYr +3.4%`, `最大负债率 26.31%`, `Int $29,651`）
+  - **`VGT + 20% TECL (融资)`**：`$716,658.81`（`CAGR 43.32%`, `MaxDD -27.51%`, `Calmar 1.575`, `WorstYr +3.4%`, `最大负债率 18.81%`, `Int $12,752`）
+  - **`VGT + 40%/30%/20% TQQQ (融资)`**：`$1,883,170.95` / `$1,118,515.18` / `$641,808.50`（`MaxDD -35.73% / -31.83% / -27.61%`, `最大负债率 32.56% / 26.11% / 18.71%`）
+  - **`SOXL信号 → 100% VGT 现货`**：`$185,802.35`（`CAGR 27.91%`, `MaxDD -18.07%`, `Calmar 1.545`, `WorstYr +3.1%`）vs **`Buy & Hold VGT`**：`$90,498.81`（`CAGR 20.39%`, `MaxDD -35.07%`, `WorstYr -29.7%`）。
+- **SOXL `C2` 旗舰大周期对比**：`VGT + 40%/30%/20% TECL` 为 `$1,433,859.46` / `$872,172.16` / `$500,002.01`（`MaxDD -36.03% / -32.75% / -28.66%`）。
+- **可视化与周更推送**：[build_vgt_margin_compare.py](tools/build_vgt_margin_compare.py) -> [vgt_margin_comparison.html](vgt_margin_comparison.html)（含实时持仓/下周操作卡片与分段 Emoji Telegram 周报 `--notify-tg`，已接入 [weekly_update.sh](tools/weekly_update.sh)）。
