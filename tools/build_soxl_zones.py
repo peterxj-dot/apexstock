@@ -2089,6 +2089,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           trendBuys.push({ x: t.entry_m, y: t.entry_px, text: entryTip });
         } else if (t.mode === "ALT") {
           altBuys.push({ x: t.entry_m, y: t.entry_px, text: entryTip });
+        } else {
+          botBuys.push({ x: t.entry_m, y: t.entry_px, text: entryTip });
         }
 
         if (t.tranche2_m && t.tranche2_px !== null) {

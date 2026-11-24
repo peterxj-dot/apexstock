@@ -2,9 +2,9 @@
 
 ## 1. 项目目录结构与核心约定
 
-- `data/`：本地日线 CSV 数据（`QQQ.csv`、`TQQQ.csv`、`SMH.csv`、`SOXL.csv` 2010 年起；`BTC-USD.csv` 2014-09-17 起），由 `tools/download_data.py` 基于 `tools/tickers.json` 增量维护，自动过滤含空值的不完整交易日。
+- `data/`：本地日线 CSV 数据（`QQQ.csv`、`TQQQ.csv`、`SMH.csv`、`SOXL.csv`、`MSTR.csv` 2010 年起；`BTC-USD.csv` 2014-09-17 起），由 `tools/download_data.py` 基于 `tools/tickers.json` 增量维护，自动过滤含空值的不完整交易日。
 - `indicators/`：技术指标包（`sma`、`ema`、`macd`、`bollinger_bands`、`rsi`、`fisher_transform`、`atr`、`historical_volatility`）。
-- `tools/`：数据下载、可视化生成与自动更新脚本（`build_chart.py` -> `chart.html`；`build_soxl_zones.py` -> `soxl_monthly_zones.html`；`build_tqqq_zones.py` -> `tqqq_monthly_zones.html`；`build_btc_zones.py` -> `btc_monthly_zones.html`；`weekly_update.sh` 美股周更；`daily_btc_update.sh` + `com.apexstock.daily_btc_update.plist` BTC UTC 日更）。
+- `tools/`：数据下载、可视化生成与自动更新脚本（`build_chart.py` -> `chart.html`；`build_soxl_zones.py` -> `soxl_monthly_zones.html`；`build_tqqq_zones.py` -> `tqqq_monthly_zones.html`；`build_btc_zones.py` -> `btc_monthly_zones.html`；`build_mstr_zones.py` -> `mstr_monthly_zones.html`；`weekly_update.sh` 美股周更；`daily_btc_update.sh` + `com.apexstock.daily_btc_update.plist` BTC & MSTR 日更）。
 - `tmp/`：策略扫描、验证脚本与中间结果 CSV（`scan_soxl_strategies.py`、`scan_soxl_v2_lowdd.py`、`scan_paired_entry_exit.py`、`scan_exit_conditioned_reentry.py`、`validate_oos_and_tqqq.py`、`improve_bottom_timing.py`、`study_major_exits_and_backtest.py`、`test_cycle_v2_and_hybrid.py`、`test_bottom_filter_and_tp_exits.py`）。
 
 ### 回测防作弊规范（严格因果执行）
@@ -133,4 +133,31 @@
 
 ### 4.3 每日自动化与可视化入口
 - **图表生成**：[build_btc_zones.py](tools/build_btc_zones.py) -> [btc_monthly_zones.html](btc_monthly_zones.html)（标识绿色 `买点区 (H-540~-460)`、红色 `卖点区 (H+480~+560)` 及实盘雷达；支持 `--notify-tg`）。
-- **UTC 每日自动更新**：[daily_btc_update.sh](tools/daily_btc_update.sh)（每日 `00:15 UTC` / `09:15 JST` 后自动拉取 `BTC-USD`、重生成图表并推送 Telegram，按 `logs/last_daily_btc_run_utc_date.txt` 去重），由 `~/Library/LaunchAgents/com.apexstock.daily_btc_update.plist`（模板位于 [com.apexstock.daily_btc_update.plist](tools/com.apexstock.daily_btc_update.plist)）每小时唤醒检查。
+- **UTC 每日自动更新**：[daily_btc_update.sh](tools/daily_btc_update.sh)（每日 `00:15 UTC` / `09:15 JST` 后自动拉取 `BTC-USD` 与 `MSTR`、重生成图表并推送 Telegram，按 `logs/last_daily_btc_run_utc_date.txt` 去重），由 `~/Library/LaunchAgents/com.apexstock.daily_btc_update.plist`（模板位于 [com.apexstock.daily_btc_update.plist](tools/com.apexstock.daily_btc_update.plist)）每小时唤醒检查。
+
+---
+
+## 5. MSTR 比特币周期与 mNAV 溢价策略（`2020–2026`）
+
+- **数据与回测基准**：`MSTR.csv`（`2020-01-02 ~ 2026-11-23`，初始 `$10,000`，年化按 `252` 日计，双边 `0.05%` 手续费，当日收盘触发信号、次日 `Open` 成交；BTC 信号严格仅使用前一日已完成日线）。
+- **核心发现**：MSTR 相对 BTC 多了一层 **mNAV 溢价周期**（高溢价见顶时往往提前 BTC 见顶且伴随放量，随后呈尖顶急跌），而长期 `BTC/share` 增持抬升了 `MSTR/BTC` 绝对中枢，因此采用 **`MSTR/BTC ÷ 60日均值`** 的相对脉冲并叠加放量确认与周期阶段锁盈。
+
+### 5.1 默认旗舰策略：`Halv_mNAV_Spike170`（3 战 100% 全胜）
+- **买底入口**：沿用 BTC 买点区 `[H-540 ~ H-460]`（`BTC HV_Ratio ≥ 1.30` 脉冲后冷却 `< 1.0`，或 `H-490` 兜底）。
+- **放量 mNAV 溢价逃顶**：`ds ≥ 150` 且 **`MSTR/BTC 相对 60 日均值 ≥ 1.70x`** 且 **`近 3 日最大量比 ≥ 1.5x`**（vs 20 日均量），次日开盘主动止盈（过滤无量 `BTC/share` 漂移假警报）。
+- **周期阶段接回 / 锁盈**：
+  - 若逃顶发生在 **减半前或早期 (`ds < 200` 或 `du ≤ 100`)**（如 `2024-03-14`）：等待 `MSTR/BTC ≤ 1.10x` 冷却且站上 `MSTR GAC(10,2,1.5)` 中轨后接回主升浪（如 `2024-05-17 @ $150.10`）。
+  - 若逃顶发生在 **减半中后期 (`ds ≥ 200`)**（如 `2021-02-09`、`2024-11-21`）：直接锁盈空仓等待下轮买点区，规避后半程 mNAV 压缩阴跌；若未触发 mNAV 逃顶，则由 BTC 卖点区 `[H+480~+560]` 兜底清仓。
+- **历史 3 笔全胜明细**：`2020-01-03 @ $14.30 -> 2021-02-09 @ $113.77 (+694.7%)`、`2022-12-01 @ $19.72 -> 2024-03-14 @ $170.80 (+765.3%)`、`2024-05-17 @ $150.10 -> 2024-11-21 @ $535.63 (+256.5%)`。
+
+### 5.2 MSTR 策略回测对比（`2020-01-02 ~ 2026-11-23`，初始 `$10,000`）
+
+| 策略 | Final ($) | CAGR | MaxDD | Calmar | Trades / WinRate |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **`Halv_mNAV_Spike170`** *(默认)* | **`$2,451,537.46`** | **`122.56%`** | `-39.68%` | **`3.089`** | `3` / **`100.0%`** |
+| `BTC_Halv_HV_Combo` | `$958,440.78` | `94.15%` | `-64.61%` | `1.457` | `2` / `100.0%` |
+| `Halv_Phase_MSTR_GAC` | `$456,387.04` | `74.30%` | `-64.48%` | `1.152` | `9` / `55.6%` |
+| `Halv_MSTR_HV130_Cool90` | `$225,623.52` | `57.33%` | **`-39.08%`** | `1.467` | `5` / `60.0%` |
+| `Buy & Hold (MSTR)` | `$58,983.22` | `29.44%` | `-89.27%` | `0.330` | `1` / `100.0%` |
+
+- **可视化与自动更新**：[build_mstr_zones.py](tools/build_mstr_zones.py) -> [mstr_monthly_zones.html](mstr_monthly_zones.html)（支持 `--notify-tg`，已接入 [daily_btc_update.sh](tools/daily_btc_update.sh) 每日自动更新并推送 Telegram）。

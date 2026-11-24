@@ -45,8 +45,9 @@ fi
   echo "============================================================"
   echo "[START] Local: $(date '+%Y-%m-%d %H:%M:%S %Z') | UTC: $UTC_STR | Day: $UTC_DATE"
   cd "$ROOT"
-  "$PYTHON_BIN" "$ROOT/tools/download_data.py" --tickers BTC-USD
+  "$PYTHON_BIN" "$ROOT/tools/download_data.py" --tickers BTC-USD,MSTR
   "$PYTHON_BIN" "$ROOT/tools/build_btc_zones.py" --notify-tg
+  "$PYTHON_BIN" "$ROOT/tools/build_mstr_zones.py" --notify-tg
   echo "$UTC_DATE" > "$STAMP_FILE"
   echo "[DONE] Marked $UTC_DATE complete at $(date '+%Y-%m-%d %H:%M:%S %Z')"
 } >> "$LOG_FILE" 2>&1
