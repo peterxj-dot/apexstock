@@ -359,6 +359,7 @@ def simulate_d1_x1a_wtsl35(
             trade_mode = pending_entry_mode
             peak_d_close = c
             peak_w_close = 0.0
+            sl_streak = 0
         elif pending_action == "BUY_HALF" and tranches == 0:
             trade_cash_start = cash
             cost = 0.5 * cash
@@ -376,6 +377,7 @@ def simulate_d1_x1a_wtsl35(
             trade_mode = pending_entry_mode
             peak_d_close = c
             peak_w_close = 0.0
+            sl_streak = 0
         elif pending_action == "BUY_TOPUP" and tranches == 1 and shares > 0:
             new_shares = (cash * (1.0 - FEE_RATE)) / o
             tot = shares + new_shares
@@ -999,6 +1001,7 @@ def simulate_tp3h(
     mode_tag_override: str | None = None,
     strategy_id: str | None = None,
     tp_split_lottery_pct: float = 0.0,
+    consec_sl_weeks: int = 1,
 ) -> dict:
     """Simulate upgraded Strategy 3 with proactive high-zone TP3h (with or without F1 SOXL anti-fake-bottom filter)."""
     daily_df = feats["daily"]
@@ -1037,6 +1040,7 @@ def simulate_tp3h(
     pending_reason = ""
     pending_sig_w_pos = -1
     cooldown_until_pos = -1
+    sl_streak = 0
 
     equity = np.empty(n_bt, dtype=np.float64)
     trades: list[dict] = []
@@ -1063,6 +1067,7 @@ def simulate_tp3h(
             lot_active = False
             peak_d_close = c
             peak_w_close = 0.0
+            sl_streak = 0
         elif pending_action == "SELL" and shares > 0:
             if pos <= entry_fill_pos:
                 raise AssertionError(f"Same-day buy-sell at {dt_str}")
@@ -1157,9 +1162,13 @@ def simulate_tp3h(
             vs30 = w_row["Close_vs_30W%"]
             unmatured = (pd.isna(mf) or float(mf) < 1.5) and (peak_d_close < avg_entry_px * 1.50)
             if unmatured and wc < avg_entry_px * 0.75:
-                pending_action = "SELL"
-                pending_reason = "SL_W25%"
-            elif pos > entry_fill_pos:
+                sl_streak += 1
+                if sl_streak >= consec_sl_weeks:
+                    pending_action = "SELL"
+                    pending_reason = "SL_W25%"
+            else:
+                sl_streak = 0
+            if pending_action == "" and pos > entry_fill_pos:
                 hold_weeks = w_pos - entry_sig_w_pos
                 if hold_weeks >= 50 and pd.notna(mf) and float(mf) >= 2.0 and pd.notna(vs30) and float(vs30) >= 40.0:
                     high_zone_armed = True
@@ -2784,6 +2793,55 @@ def send_tg_notification(message: str, timeout: int = 10) -> bool:
         print("[Telegram] Missing TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID and apex/utils/notifier.py not found.")
         return False
 
+
+def send_pushover_notification(
+    title: str,
+    message: str,
+    priority: int = 2,
+    sound: str = "siren",
+    retry: int = 30,
+    expire: int = 600,
+    timeout: int = 10,
+) -> bool:
+    """Send Pushover notification (priority=2 triggers emergency siren alert until acknowledged)."""
+    _load_env_file(ROOT / ".env")
+    user_key = os.getenv("PUSHOVER_USER_KEY", "").strip()
+    api_token = os.getenv("PUSHOVER_API_TOKEN", "").strip()
+    if not user_key or not api_token:
+        print("[Pushover] Missing PUSHOVER_USER_KEY / PUSHOVER_API_TOKEN.")
+        return False
+
+    payload = {
+        "token": api_token,
+        "user": user_key,
+        "title": title[:250],
+        "message": message[:1024],
+        "priority": str(priority),
+        "sound": sound,
+    }
+    if priority == 2:
+        payload["retry"] = str(max(30, retry))
+        payload["expire"] = str(min(10800, expire))
+
+    data = urllib.parse.urlencode(payload).encode("utf-8")
+    req = urllib.request.Request("https://api.pushover.net/1/messages.json", data=data)
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status == 200:
+                    return True
+        except urllib.error.URLError as e:
+            if hasattr(e, "reason") and isinstance(e.reason, ssl.SSLCertVerificationError):
+                ctx = ssl._create_unverified_context()
+                with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
+                    if resp.status == 200:
+                        return True
+            time.sleep(2 * (attempt + 1))
+        except Exception as e:
+            print(f"[Pushover] Send attempt {attempt + 1} failed: {e}")
+            time.sleep(2 * (attempt + 1))
+    return False
+
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     safe_msg = f"<b>[APEXSTOCK]</b>\n{html_lib.escape(message)}"[:4000]
     data = urllib.parse.urlencode({"chat_id": chat_id, "text": safe_msg, "parse_mode": "HTML"}).encode("utf-8")
@@ -2803,6 +2861,55 @@ def send_tg_notification(message: str, timeout: int = 10) -> bool:
             time.sleep(2 * (attempt + 1))
         except Exception as e:
             print(f"[Telegram] Send attempt {attempt + 1} failed: {e}")
+            time.sleep(2 * (attempt + 1))
+    return False
+
+
+def send_pushover_notification(
+    title: str,
+    message: str,
+    priority: int = 2,
+    sound: str = "siren",
+    retry: int = 30,
+    expire: int = 600,
+    timeout: int = 10,
+) -> bool:
+    """Send Pushover notification (priority=2 triggers emergency siren alert until acknowledged)."""
+    _load_env_file(ROOT / ".env")
+    user_key = os.getenv("PUSHOVER_USER_KEY", "").strip()
+    api_token = os.getenv("PUSHOVER_API_TOKEN", "").strip()
+    if not user_key or not api_token:
+        print("[Pushover] Missing PUSHOVER_USER_KEY / PUSHOVER_API_TOKEN.")
+        return False
+
+    payload = {
+        "token": api_token,
+        "user": user_key,
+        "title": title[:250],
+        "message": message[:1024],
+        "priority": str(priority),
+        "sound": sound,
+    }
+    if priority == 2:
+        payload["retry"] = str(max(30, retry))
+        payload["expire"] = str(min(10800, expire))
+
+    data = urllib.parse.urlencode(payload).encode("utf-8")
+    req = urllib.request.Request("https://api.pushover.net/1/messages.json", data=data)
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status == 200:
+                    return True
+        except urllib.error.URLError as e:
+            if hasattr(e, "reason") and isinstance(e.reason, ssl.SSLCertVerificationError):
+                ctx = ssl._create_unverified_context()
+                with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
+                    if resp.status == 200:
+                        return True
+            time.sleep(2 * (attempt + 1))
+        except Exception as e:
+            print(f"[Pushover] Send attempt {attempt + 1} failed: {e}")
             time.sleep(2 * (attempt + 1))
     return False
 
@@ -2827,6 +2934,7 @@ def main() -> None:
         mode_tag_override="BOT_C2",
         strategy_id="C2_F1_or_MFishLin_TP3h",
         tp_split_lottery_pct=0.10,
+        consec_sl_weeks=2,
     )
     f1_tp3h = simulate_tp3h(feats, use_f1_filter=True, end_date=latest_date)
     f0_tp3h = simulate_tp3h(feats, use_f1_filter=False, end_date=latest_date)
@@ -2877,6 +2985,14 @@ def main() -> None:
         tg_msg = format_tg_summary(live_market, strategies)
         ok = send_tg_notification(tg_msg)
         print(f"[Telegram] sent={ok}")
+        c2_act = strategies["C2_F1_or_MFishLin_TP3h"]["live_status"]["action"]
+        h5_act = strategies["H5_E2_Promote_S1_AdaptHV"]["live_status"]["action"]
+        if c2_act in ("BUY", "SELL") or h5_act in ("BUY", "SELL"):
+            po_ok = send_pushover_notification(
+                title=f"🚨 SOXL 交易信号 ({live_market['last_date']})",
+                message=f"C2: {strategies['C2_F1_or_MFishLin_TP3h']['live_status']['badge']}\nH5: {strategies['H5_E2_Promote_S1_AdaptHV']['live_status']['badge']}\nSOXL=${live_market['soxl_close']:.2f}",
+            )
+            print(f"[Pushover] sent={po_ok}")
 
 
 if __name__ == "__main__":

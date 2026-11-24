@@ -26,6 +26,7 @@ from tools.build_soxl_zones import (
     detect_c7_vol_entries,
     load_daily_adjusted,
     render_html,
+    send_pushover_notification,
     send_tg_notification,
 )
 
@@ -573,6 +574,13 @@ def main() -> None:
         tg_msg = format_mstr_tg_summary(live_market, strategies)
         ok = send_tg_notification(tg_msg)
         print(f"[Telegram] sent={ok}")
+        s1 = strategies["Halv_mNAV_Spike170"]["live_status"]
+        if s1["action"] in ("BUY", "SELL"):
+            po_ok = send_pushover_notification(
+                title=f"🚨 MSTR 交易信号: {s1['badge']}",
+                message=tg_msg,
+            )
+            print(f"[Pushover] sent={po_ok}")
 
 
 def format_mstr_tg_summary(live_market: dict, strategies: dict) -> str:

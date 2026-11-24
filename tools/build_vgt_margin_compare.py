@@ -20,6 +20,7 @@ from tools.build_soxl_zones import (
     _compute_stats,
     build_causal_features,
     load_daily_adjusted,
+    send_pushover_notification,
     send_tg_notification,
     simulate_h5_adapt_hv,
     simulate_tp3h,
@@ -535,6 +536,14 @@ def main() -> None:
         tg_msg = format_vgt_tg_summary(live_info, engines)
         ok = send_tg_notification(tg_msg)
         print(f"[Telegram] sent={ok}")
+        h5_act = live_info["engines"]["H5"]["action"]
+        c2_act = live_info["engines"]["C2"]["action"]
+        if h5_act in ("BUY", "SELL") or c2_act in ("BUY", "SELL"):
+            po_ok = send_pushover_notification(
+                title=f"🚨 VGT+TECL 融资信号 ({live_info['last_date']})",
+                message=tg_msg,
+            )
+            print(f"[Pushover] sent={po_ok}")
 
 
 if __name__ == "__main__":
