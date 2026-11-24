@@ -160,4 +160,4 @@
 | `Halv_MSTR_HV130_Cool90` | `$225,623.52` | `57.33%` | **`-39.08%`** | `1.467` | `5` / `60.0%` |
 | `Buy & Hold (MSTR)` | `$58,983.22` | `29.44%` | `-89.27%` | `0.330` | `1` / `100.0%` |
 
-- **可视化与自动更新**：[build_mstr_zones.py](tools/build_mstr_zones.py) -> [mstr_monthly_zones.html](mstr_monthly_zones.html)（支持 `--notify-tg`，已接入 [daily_btc_update.sh](tools/daily_btc_update.sh) 每日自动更新并推送 Telegram）。
+- **可视化与自动更新**：[build_mstr_zones.py](tools/build_mstr_zones.py) -> [mstr_monthly_zones.html](mstr_monthly_zones.html)（支持 `--notify-tg`，已接入 [daily_btc_update.sh](tools/daily_btc_update.sh) 每日自动更新并推送 Telegram；策略与动量/成交量验证脚本位于 `tmp/study_mstr_strategies.py`、`tmp/study_mstr_hybrids.py`、`tmp/study_mstr_momentum.py`、`tmp/study_mstr_volume.py`）。

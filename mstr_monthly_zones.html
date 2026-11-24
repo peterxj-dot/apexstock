@@ -1081,9 +1081,11 @@
           radarCell("BTC近35日恐慌脉冲 HVR≥1.30", Boolean(ml.btc_hvr_spike35), `当前 BTC HVR=${fmtV(ml.btc_hvr)}`),
           radarCell("BTC脉冲冷却 HVR < 1.0", ml.btc_hvr < 1.0, `当前 BTC HV20/HV60 = ${fmtV(ml.btc_hvr)}`),
         ];
+        const canReenterWindow = ml.ds < 200 || ml.du <= 100;
         const g2 = [
           radarCell("买点区时间兜底 H ≤ -490天", ml.du <= 490, `当前 -${ml.du} 天 (还差 ${Math.max(0, ml.du - 490)} 天)`),
-          radarCell("mNAV冷却接回参考 (≤1.10x)", ml.mstr_btc_r60 <= 1.10, `当前 ${fmtV(ml.mstr_btc_r60)}x | MSTR GAC中轨 $${fmtV(ml.gac_mid)}`),
+          radarCell("逃顶后锁盈过滤 (仅H+200前接回)", canReenterWindow, `当前 H+${ml.ds}d / -${ml.du}d (H+200后锁盈过滤亏损单)`),
+          radarCell("mNAV冷却接回 (≤1.10x 且 >GAC中轨)", canReenterWindow && ml.mstr_btc_r60 <= 1.10 && m.soxl_close > ml.gac_mid, `R60=${fmtV(ml.mstr_btc_r60)}x | $${fmtV(m.soxl_close)} vs GAC $${fmtV(ml.gac_mid)}`),
         ];
         groups.push(renderRadarGroup("买点区主规则 · BTC减半窗口脉冲冷却（满足全部 → 买入）", g1, "all"));
         groups.push(renderRadarGroup("兜底与溢价冷却参考", g2, "any_entry"));
