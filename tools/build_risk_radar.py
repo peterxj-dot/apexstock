@@ -387,6 +387,11 @@ def compute_risk_data() -> dict:
         "smh_dd_20d": smh_dd_20d,
         "steps": b_steps,
         "recent_rows": recent_rows,
+        "recent20_series": {
+            "dates": [d.strftime("%Y-%m-%d") for d in recent20.index],
+            "vr": [round(float(x), 3) for x in recent20["vix_ratio"]],
+            "sp": [round(float(x), 1) if pd.notna(x) else None for x in recent20["iv_hv_spread"]],
+        },
     }
 
     # Chart series from 2018-01-01 onward
@@ -561,11 +566,15 @@ def render_html(payload: dict) -> str:
     .step-top {{ font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 6px; }}
     .step-sub {{ font-size: 11px; color: var(--muted); margin-top: 3px; }}
     .recent-wrap {{ max-height: 290px; overflow-y: auto; border: 1px solid rgba(52,59,79,0.5); border-radius: 8px; }}
+    .recent-charts {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }}
+    .mini-chart-box {{
+      background: rgba(8,16,40,0.45); border: 1px solid rgba(52,59,79,0.55); border-radius: 10px; padding: 10px 12px;
+    }}
 
     @media (max-width: 1200px) {{
       .kpi-grid {{ grid-template-columns: repeat(2, 1fr); }}
       .steps-grid {{ grid-template-columns: repeat(2, 1fr); }}
-      .charts-grid, .cross-box {{ grid-template-columns: 1fr; }}
+      .charts-grid, .cross-box, .recent-charts {{ grid-template-columns: 1fr; }}
     }}
     @media (max-width: 680px) {{
       .kpi-grid, .steps-grid {{ grid-template-columns: 1fr; }}
@@ -626,6 +635,22 @@ def render_html(payload: dict) -> str:
           </thead>
           <tbody id="recentBody"></tbody>
         </table>
+      </div>
+      <div class="recent-charts">
+        <div class="mini-chart-box">
+          <div class="card-title" style="margin-bottom:6px;">
+            <span>近 20 日 VIX / VIX3M 期限结构</span>
+            <span class="card-sub">红线 1.00 倒挂恐慌 · 黄线 0.95 警戒</span>
+          </div>
+          <div id="chartRecent20Vr" style="height:240px;"></div>
+        </div>
+        <div class="mini-chart-box">
+          <div class="card-title" style="margin-bottom:6px;">
+            <span>近 20 日 VXN - QQQ_HV20 保费溢价</span>
+            <span class="card-sub">红 +8 / 黄 +4 / 零轴 0 / 紫 -8 深度恐慌门槛</span>
+          </div>
+          <div id="chartRecent20Sp" style="height:240px;"></div>
+        </div>
       </div>
     </div>
 
@@ -807,6 +832,63 @@ def render_html(payload: dict) -> str:
         <td><span class="pill ${{pillCls(r.tone)}}" style="padding:2px 8px;font-size:11px;">${{r.tag}}</span></td>
       </tr>
     `).join("");
+
+    // Recent 20d threshold curves directly under recent table
+    const r20 = BOTTOM_TRACKER.recent20_series || {{ dates: [], vr: [], sp: [] }};
+    function rHLine(y, color, dash) {{
+      return {{ type: "line", xref: "paper", x0: 0, x1: 1, yref: "y", y0: y, y1: y, line: {{ color, width: 1.3, dash }} }};
+    }}
+    function rHLabel(y, text, color) {{
+      return {{ xref: "paper", x: 0.995, yref: "y", y, xanchor: "right", yanchor: "bottom", text, showarrow: false, font: {{ size: 10, color }} }};
+    }}
+    const rBase = {{
+      paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)", font: {{ color: "#D1DBF9", size: 10 }},
+      margin: {{ l: 42, r: 12, t: 10, b: 28 }},
+      xaxis: {{ gridcolor: "rgba(52,59,79,0.4)" }},
+      showlegend: false,
+    }};
+    const rVrVals = r20.vr.filter(v => v != null);
+    const rVrMax = Math.max(1.08, ...rVrVals) * 1.03;
+    const rVrMin = Math.min(0.86, ...rVrVals) * 0.97;
+    Plotly.newPlot("chartRecent20Vr", [
+      {{ type: "scatter", mode: "lines+markers", name: "VIX / VIX3M", x: r20.dates, y: r20.vr, line: {{ color: "#FDB52A", width: 2.2 }}, marker: {{ size: 5 }} }},
+    ], {{
+      ...rBase,
+      yaxis: {{ gridcolor: "rgba(52,59,79,0.4)", range: [rVrMin, rVrMax] }},
+      shapes: [
+        {{ type: "rect", xref: "paper", x0: 0, x1: 1, yref: "y", y0: 1.0, y1: rVrMax, fillcolor: "rgba(255,90,121,0.10)", line: {{ width: 0 }} }},
+        rHLine(1.0, "#FF5A79", "dash"),
+        rHLine(0.95, "#FDB52A", "dot"),
+      ],
+      annotations: [
+        rHLabel(1.0, "倒挂恐慌线 1.00", "#FF5A79"),
+        rHLabel(0.95, "警戒线 0.95", "#FDB52A"),
+      ],
+    }}, {{ responsive: true }});
+
+    const rSpVals = r20.sp.filter(v => v != null);
+    const rSpMax = Math.max(10, ...rSpVals) + 2;
+    const rSpMin = Math.min(-11, ...rSpVals) - 2;
+    Plotly.newPlot("chartRecent20Sp", [
+      {{ type: "scatter", mode: "lines+markers", name: "VXN - QQQ_HV20", x: r20.dates, y: r20.sp, line: {{ color: "#00C2FF", width: 2.2 }}, marker: {{ size: 5 }} }},
+    ], {{
+      ...rBase,
+      yaxis: {{ gridcolor: "rgba(52,59,79,0.4)", range: [rSpMin, rSpMax] }},
+      shapes: [
+        {{ type: "rect", xref: "paper", x0: 0, x1: 1, yref: "y", y0: rSpMin, y1: -8.0, fillcolor: "rgba(203,60,255,0.11)", line: {{ width: 0 }} }},
+        {{ type: "rect", xref: "paper", x0: 0, x1: 1, yref: "y", y0: 4.0, y1: rSpMax, fillcolor: "rgba(255,90,121,0.08)", line: {{ width: 0 }} }},
+        rHLine(8.0, "#FF5A79", "dash"),
+        rHLine(4.0, "#FDB52A", "dot"),
+        rHLine(0.0, "#7E89AC", "solid"),
+        rHLine(-8.0, "#CB3CFF", "dash"),
+      ],
+      annotations: [
+        rHLabel(8.0, "保费暴涨 +8", "#FF5A79"),
+        rHLabel(4.0, "Q1 正溢价 +4", "#FDB52A"),
+        rHLabel(0.0, "零轴 0", "#7E89AC"),
+        rHLabel(-8.0, "深度恐慌门槛 -8", "#CB3CFF"),
+      ],
+    }}, {{ responsive: true }});
 
     // Speedometer Gauge helper (SVG semi-circle with green/amber/red zones + needle)
     function polarPt(cx, cy, r, frac) {{
