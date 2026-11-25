@@ -264,6 +264,7 @@ def compute_risk_data() -> dict:
             "iv_hv_spread": round(float(last["iv_hv_spread"]), 2),
             "move": round(float(last["MOVE"]), 2),
             "hyg_lqd": round(float(last["hyg_lqd"]), 4),
+            "hyg_lqd_dev_pct": round(float((last["hyg_lqd"] / last["hyg_lqd_sma50"] - 1.0) * 100.0), 2),
             "warn_score": ws,
             "is_earnings_season": earn_season,
             "light": light,
@@ -353,13 +354,22 @@ def render_html(payload: dict) -> str:
       background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 18px;
       display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; align-items: center;
     }}
-    .kpi-grid {{ display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; }}
+    .kpi-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }}
     .kpi {{
-      background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 13px 15px;
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px;
+      display: flex; flex-direction: column; gap: 8px;
     }}
-    .kpi-label {{ font-size: 11px; color: var(--muted); display: flex; justify-content: space-between; }}
-    .kpi-val {{ font-size: 22px; font-weight: 700; margin: 5px 0 3px; font-variant-numeric: tabular-nums; }}
-    .kpi-foot {{ font-size: 11px; color: var(--text-sec); }}
+    .kpi-head {{ display: flex; justify-content: space-between; align-items: center; gap: 8px; }}
+    .kpi-title {{ font-size: 13px; font-weight: 700; color: var(--text); }}
+    .kpi-badge {{ font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }}
+    .gauge-wrap {{ display: flex; flex-direction: column; align-items: center; margin: 2px 0; }}
+    .gauge-val {{ font-size: 22px; font-weight: 700; margin-top: -10px; font-variant-numeric: tabular-nums; }}
+    .gauge-sub {{ font-size: 11px; color: var(--muted); margin-top: 2px; }}
+    .kpi-guide {{
+      background: rgba(8,16,40,0.55); border: 1px solid rgba(52,59,79,0.65); border-radius: 8px;
+      padding: 8px 10px; font-size: 11px; line-height: 1.55; color: var(--text-sec);
+    }}
+    .kpi-guide b {{ color: var(--cyan); }}
 
     .charts-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
     .card {{
@@ -387,11 +397,11 @@ def render_html(payload: dict) -> str:
     .tag-hot {{ background: rgba(255,90,121,0.16); color: var(--red); border-color: rgba(255,90,121,0.35); }}
 
     @media (max-width: 1200px) {{
-      .kpi-grid {{ grid-template-columns: repeat(3, 1fr); }}
+      .kpi-grid {{ grid-template-columns: repeat(2, 1fr); }}
       .charts-grid, .cross-box {{ grid-template-columns: 1fr; }}
     }}
     @media (max-width: 680px) {{
-      .kpi-grid {{ grid-template-columns: repeat(2, 1fr); }}
+      .kpi-grid {{ grid-template-columns: 1fr; }}
     }}
   </style>
 </head>
@@ -551,50 +561,135 @@ def render_html(payload: dict) -> str:
     document.getElementById("crossDesc").textContent = RISK_LIVE.cross_desc;
     document.getElementById("actionHint").textContent = RISK_LIVE.action_hint;
 
-    // KPI cards
-    const kpis = [
+    // Speedometer Gauge helper (SVG semi-circle with green/amber/red zones + needle)
+    function polarPt(cx, cy, r, frac) {{
+      const th = Math.PI * (1 - Math.max(0, Math.min(1, frac)));
+      return [cx + r * Math.cos(th), cy - r * Math.sin(th)];
+    }}
+    function arcPath(cx, cy, r, f0, f1) {{
+      const [x0, y0] = polarPt(cx, cy, r, f0);
+      const [x1, y1] = polarPt(cx, cy, r, f1);
+      return `M ${{x0.toFixed(1)}} ${{y0.toFixed(1)}} A ${{r}} ${{r}} 0 0 1 ${{x1.toFixed(1)}} ${{y1.toFixed(1)}}`;
+    }}
+    function buildGaugeSvg(val, min, max, zones, minLabel, maxLabel) {{
+      const cx = 110, cy = 96, r = 74;
+      const toFrac = (v) => Math.max(0, Math.min(1, (v - min) / (max - min)));
+      const arcs = zones.map(z => {{
+        const p = arcPath(cx, cy, r, toFrac(z.from), toFrac(z.to));
+        return `<path d="${{p}}" fill="none" stroke="${{z.color}}" stroke-width="14" stroke-linecap="butt" opacity="0.88" />`;
+      }}).join("");
+      const fVal = toFrac(val);
+      const [nx, ny] = polarPt(cx, cy, r - 10, fVal);
+      const [tx, ty] = polarPt(cx, cy, r + 15, fVal);
+      return `
+        <svg viewBox="0 0 220 112" style="width:100%;max-width:240px;height:auto;overflow:visible;">
+          <path d="${{arcPath(cx, cy, r, 0, 1)}}" fill="none" stroke="#1B284F" stroke-width="14" />
+          ${{arcs}}
+          <line x1="${{cx}}" y1="${{cy}}" x2="${{nx.toFixed(1)}}" y2="${{ny.toFixed(1)}}" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" />
+          <circle cx="${{cx}}" cy="${{cy}}" r="5.5" fill="#00C2FF" stroke="#FFFFFF" stroke-width="1.5" />
+          <text x="20" y="110" fill="#7E89AC" font-size="10" text-anchor="middle">${{minLabel}}</text>
+          <text x="200" y="110" fill="#7E89AC" font-size="10" text-anchor="middle">${{maxLabel}}</text>
+        </svg>
+      `;
+    }}
+
+    const G = "#14CA74", Y = "#FDB52A", R = "#FF5A79";
+    const gauges = [
       {{
-        label: "VIX / VIX3M",
-        val: RISK_LIVE.vix_ratio.toFixed(3),
-        color: RISK_LIVE.signals.vix_inv ? "var(--red)" : RISK_LIVE.vix_ratio >= 0.95 ? "var(--amber)" : "var(--green)",
-        foot: `VIX ${{RISK_LIVE.vix}} / VIX3M ${{RISK_LIVE.vix3m}} (≥1.0 倒挂)`
+        title: "VIX / VIX3M 期限结构",
+        val: RISK_LIVE.vix_ratio,
+        valText: RISK_LIVE.vix_ratio.toFixed(3),
+        min: 0.75, max: 1.20, minLabel: "0.75 安全", maxLabel: "1.20 极度恐慌",
+        zones: [{{ from: 0.75, to: 0.95, color: G }}, {{ from: 0.95, to: 1.00, color: Y }}, {{ from: 1.00, to: 1.20, color: R }}],
+        status: RISK_LIVE.signals.vix_inv ? "红灯倒挂" : RISK_LIVE.vix_ratio >= 0.95 ? "黄灯警戒" : "绿灯正常",
+        tone: RISK_LIVE.signals.vix_inv ? "sell" : RISK_LIVE.vix_ratio >= 0.95 ? "hold" : "buy",
+        sub: `VIX ${{RISK_LIVE.vix}} / VIX3M ${{RISK_LIVE.vix3m}} (≥1.00 倒挂)`,
+        role: "对比 1 个月与 3 个月期权价格，衡量机构是否抢买近期保护。",
+        usage: "≥1.00 说明大资金不计成本避险；若叠加高位或财报季，果断降杠杆/买 Put。",
       }},
       {{
-        label: "^VXN (纳指IV)",
-        val: RISK_LIVE.vxn.toFixed(2),
-        color: RISK_LIVE.signals.vxn_spike ? "var(--red)" : "var(--text)",
-        foot: RISK_LIVE.signals.vxn_spike ? "状态: 突破60日均值+20%脉冲" : "状态: 正常区间"
+        title: "^VXN 纳指恐慌指数",
+        val: RISK_LIVE.vxn,
+        valText: RISK_LIVE.vxn.toFixed(2),
+        min: 12, max: 45, minLabel: "12 平静", maxLabel: "45 恐慌",
+        zones: [{{ from: 12, to: 24, color: G }}, {{ from: 24, to: 30, color: Y }}, {{ from: 30, to: 45, color: R }}],
+        status: RISK_LIVE.signals.vxn_spike ? "脉冲警报" : RISK_LIVE.vxn >= 24 ? "偏高警戒" : "绿灯平静",
+        tone: RISK_LIVE.signals.vxn_spike ? "sell" : RISK_LIVE.vxn >= 24 ? "hold" : "buy",
+        sub: RISK_LIVE.signals.vxn_spike ? "突破60日均值 +20% 且 ≥24" : "正常区间 (<24 安全 / ≥30 高危)",
+        role: "反映华尔街对纳指科技股未来 30 天波动的恐慌定价。",
+        usage: "科技股杀估值前常先飙升；突破 60 日均线 +20% 且 ≥24 时停止加杠杆。",
       }},
       {{
-        label: "VXN - QQQ_HV20",
-        val: (RISK_LIVE.iv_hv_spread >= 0 ? "+" : "") + RISK_LIVE.iv_hv_spread.toFixed(2),
-        color: RISK_LIVE.signals.iv_hv_high ? "var(--amber)" : "var(--cyan)",
-        foot: `QQQ HV20=${{RISK_LIVE.qqq_hv20}}% (≥+8 保费偏贵)`
+        title: "VXN - QQQ_HV20 保费溢价",
+        val: RISK_LIVE.iv_hv_spread,
+        valText: (RISK_LIVE.iv_hv_spread >= 0 ? "+" : "") + RISK_LIVE.iv_hv_spread.toFixed(2),
+        min: -5, max: 15, minLabel: "-5 便宜", maxLabel: "+15 暴涨",
+        zones: [{{ from: -5, to: 4, color: G }}, {{ from: 4, to: 8, color: Y }}, {{ from: 8, to: 15, color: R }}],
+        status: RISK_LIVE.signals.iv_hv_high ? "保费偏贵" : RISK_LIVE.iv_hv_spread >= 4 ? "略偏高" : "绿灯正常",
+        tone: RISK_LIVE.signals.iv_hv_high ? "hold" : "buy",
+        sub: `QQQ 实际波动 HV20=${{RISK_LIVE.qqq_hv20}}% (≥+8 预警)`,
+        role: "对比“期权暗含恐慌”与“现货实际波动”，抓股价没跌保费先涨。",
+        usage: "差值 ≥+8 说明机构暗中买保险；若此时现货还在高位横盘，警惕突发下跌。",
       }},
       {{
-        label: "^MOVE (美债波动)",
-        val: RISK_LIVE.move.toFixed(1),
-        color: RISK_LIVE.signals.move_alert ? "var(--red)" : "var(--text)",
-        foot: RISK_LIVE.signals.move_alert ? "状态: 债市剧烈重定价警报" : "状态: 债市波动平稳"
+        title: "^MOVE 美债波动率",
+        val: RISK_LIVE.move,
+        valText: RISK_LIVE.move.toFixed(1),
+        min: 50, max: 150, minLabel: "50 稳健", maxLabel: "150 动荡",
+        zones: [{{ from: 50, to: 95, color: G }}, {{ from: 95, to: 115, color: Y }}, {{ from: 115, to: 150, color: R }}],
+        status: RISK_LIVE.signals.move_alert ? "债市警报" : RISK_LIVE.move >= 95 ? "债市升温" : "绿灯稳健",
+        tone: RISK_LIVE.signals.move_alert ? "sell" : RISK_LIVE.move >= 95 ? "hold" : "buy",
+        sub: "美债利率波动 (≥95 且高于60日均线+15%报警)",
+        role: "监测美联储加息/利率预期重定价，2022 熊市与财报季的核心先知。",
+        usage: "债市抽水比股市先动；亮红灯时高估值科技与三倍杠杆 ETF 极易承压。",
       }},
       {{
-        label: "HYG / LQD (信用比)",
-        val: RISK_LIVE.hyg_lqd.toFixed(4),
-        color: RISK_LIVE.signals.credit_weak ? "var(--amber)" : "var(--green)",
-        foot: RISK_LIVE.signals.credit_weak ? "状态: 跌破50日均线走弱" : "状态: 企业信用稳健"
+        title: "HYG / LQD 信用偏离度",
+        val: RISK_LIVE.hyg_lqd_dev_pct,
+        valText: (RISK_LIVE.hyg_lqd_dev_pct >= 0 ? "+" : "") + RISK_LIVE.hyg_lqd_dev_pct.toFixed(2) + "%",
+        min: -3.0, max: 2.0, minLabel: "-3% 恶化", maxLabel: "+2% 稳健",
+        zones: [{{ from: -3.0, to: -1.0, color: R }}, {{ from: -1.0, to: -0.3, color: Y }}, {{ from: -0.3, to: 2.0, color: G }}],
+        status: RISK_LIVE.signals.credit_weak ? "信用走弱" : RISK_LIVE.hyg_lqd_dev_pct < -0.3 ? "略偏弱" : "绿灯稳健",
+        tone: RISK_LIVE.signals.credit_weak ? "hold" : "buy",
+        sub: `当前比值 ${{RISK_LIVE.hyg_lqd.toFixed(4)}} (相对50日均线偏离)`,
+        role: "垃圾债相对投资级债强弱，反映企业信用与系统性抽水风险。",
+        usage: "跌破 50 日均线 -1% 说明大资金撤离风险资产（2020 疫情前曾提前 26 天报警）。",
       }},
       {{
-        label: "新闻风险热度",
-        val: `${{RISK_LIVE.news_heat}}/100`,
-        color: RISK_LIVE.news_heat >= 40 ? "var(--amber)" : "var(--cyan)",
-        foot: `关税/地缘命中 ${{RISK_LIVE.geo_tariff_hits}} 条 · 共 ${{NEWS.risk_items_count}} 条风险新闻`
+        title: "新闻风险热度 (地缘/关税)",
+        val: RISK_LIVE.news_heat,
+        valText: `${{RISK_LIVE.news_heat}} / 100`,
+        min: 0, max: 100, minLabel: "0 平静", maxLabel: "100 高危",
+        zones: [{{ from: 0, to: 25, color: G }}, {{ from: 25, to: 50, color: Y }}, {{ from: 50, to: 100, color: R }}],
+        status: RISK_LIVE.news_heat >= 50 ? "高危密集" : RISK_LIVE.news_heat >= 25 ? "升温关注" : "绿灯平静",
+        tone: RISK_LIVE.news_heat >= 50 ? "sell" : RISK_LIVE.news_heat >= 25 ? "hold" : "buy",
+        sub: `关税/战争命中 ${{RISK_LIVE.geo_tariff_hits}} 条 · 共 ${{NEWS.risk_items_count}} 条风险新闻`,
+        role: "实时扫描主流外媒中关税、战争、芯片管制与央行冲击密度。",
+        usage: "配合期权看：新闻热+期权绿灯=口水战；新闻热+期权红灯=真避险共振。",
       }},
     ];
-    document.getElementById("kpiGrid").innerHTML = kpis.map(k => `
+
+    function badgeStyle(tone) {{
+      if (tone === "sell") return "background:rgba(255,90,121,0.16);color:var(--red);border:1px solid rgba(255,90,121,0.35);";
+      if (tone === "hold") return "background:rgba(253,181,42,0.16);color:var(--amber);border:1px solid rgba(253,181,42,0.35);";
+      return "background:rgba(20,202,116,0.16);color:var(--green);border:1px solid rgba(20,202,116,0.35);";
+    }}
+
+    document.getElementById("kpiGrid").innerHTML = gauges.map(g => `
       <div class="kpi">
-        <div class="kpi-label"><span>${{k.label}}</span></div>
-        <div class="kpi-val" style="color:${{k.color}};">${{k.val}}</div>
-        <div class="kpi-foot">${{k.foot}}</div>
+        <div class="kpi-head">
+          <span class="kpi-title">${{g.title}}</span>
+          <span class="kpi-badge" style="${{badgeStyle(g.tone)}}">${{g.status}}</span>
+        </div>
+        <div class="gauge-wrap">
+          ${{buildGaugeSvg(g.val, g.min, g.max, g.zones, g.minLabel, g.maxLabel)}}
+          <div class="gauge-val">${{g.valText}}</div>
+          <div class="gauge-sub">${{g.sub}}</div>
+        </div>
+        <div class="kpi-guide">
+          <div><b>作用：</b>${{g.role}}</div>
+          <div><b>用法：</b>${{g.usage}}</div>
+        </div>
       </div>
     `).join("");
 
