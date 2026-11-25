@@ -151,6 +151,18 @@ def fetch_news_radar() -> dict:
     }
 
 
+def _load_fred_series(sid: str) -> pd.Series:
+    p = DATA_DIR / f"FRED_{sid}.csv"
+    if not p.is_file():
+        return pd.Series(dtype=float)
+    df = pd.read_csv(p)
+    df.columns = ["Date", "Value"]
+    df = df[df["Value"] != "."].copy()
+    df["Date"] = pd.to_datetime(df["Date"])
+    df["Value"] = pd.to_numeric(df["Value"], errors="coerce")
+    return df.dropna().drop_duplicates("Date", keep="last").sort_values("Date").set_index("Date")["Value"]
+
+
 def compute_risk_data() -> dict:
     soxl = load_close("SOXL")
     smh = load_close("SMH")
@@ -200,6 +212,36 @@ def compute_risk_data() -> dict:
     )
     df["high_alt"] = df["SMH"] > df["smh_sma200"] * 1.05
     df["high_alt_warn"] = df["high_alt"] & ((df["vix_ratio"] >= 1.00) | (df["sig_vxn_spike"] & df["sig_credit_weak"]))
+
+    # Macro Liquidity (FRED: WALCL - TGA - ON RRP, causal +1d release lag for weekly Fed data)
+    walcl = _load_fred_series("WALCL")
+    tga = _load_fred_series("WTREGEN")
+    rrp = _load_fred_series("RRPONTSYD")
+    dfii10 = _load_fred_series("DFII10")
+    if not walcl.empty and not tga.empty and not rrp.empty:
+        walcl_b = walcl / 1000.0 if walcl.median() > 100_000 else walcl
+        tga_b = tga / 1000.0 if tga.median() > 10_000 else tga
+        rrp_b = rrp / 1000.0 if rrp.median() > 10_000 else rrp
+        walcl_b.index = walcl_b.index + pd.Timedelta(days=1)
+        tga_b.index = tga_b.index + pd.Timedelta(days=1)
+        cal_idx = pd.date_range("2013-01-01", max(df.index.max(), walcl_b.index.max(), rrp_b.index.max()), freq="D")
+        m_df = pd.DataFrame(index=cal_idx)
+        m_df["NetLiq_B"] = walcl_b.reindex(cal_idx).ffill() - tga_b.reindex(cal_idx).ffill() - rrp_b.reindex(cal_idx).ffill()
+        m_df["NetLiq_chg60"] = m_df["NetLiq_B"].pct_change(60) * 100.0
+        m_df["NetLiq_lead60_B"] = m_df["NetLiq_B"].shift(60)
+        m_df["RRP_B"] = rrp_b.reindex(cal_idx).ffill()
+        m_df["RealYield"] = dfii10.reindex(cal_idx).ffill() if not dfii10.empty else np.nan
+        df["NetLiq_B"] = m_df["NetLiq_B"].reindex(df.index).ffill()
+        df["NetLiq_chg60"] = m_df["NetLiq_chg60"].reindex(df.index).ffill()
+        df["NetLiq_lead60_B"] = m_df["NetLiq_lead60_B"].reindex(df.index).ffill()
+        df["RRP_B"] = m_df["RRP_B"].reindex(df.index).ffill()
+        df["RealYield"] = m_df["RealYield"].reindex(df.index).ffill()
+    else:
+        df["NetLiq_B"] = np.nan
+        df["NetLiq_chg60"] = np.nan
+        df["NetLiq_lead60_B"] = np.nan
+        df["RRP_B"] = np.nan
+        df["RealYield"] = np.nan
 
     last_dt = df.index[-1]
     last = df.iloc[-1]
@@ -265,6 +307,10 @@ def compute_risk_data() -> dict:
             "move": round(float(last["MOVE"]), 2),
             "hyg_lqd": round(float(last["hyg_lqd"]), 4),
             "hyg_lqd_dev_pct": round(float((last["hyg_lqd"] / last["hyg_lqd_sma50"] - 1.0) * 100.0), 2),
+            "net_liq_b": round(float(last["NetLiq_B"]), 1) if pd.notna(last["NetLiq_B"]) else 0.0,
+            "net_liq_chg60": round(float(last["NetLiq_chg60"]), 2) if pd.notna(last["NetLiq_chg60"]) else 0.0,
+            "rrp_b": round(float(last["RRP_B"]), 1) if pd.notna(last["RRP_B"]) else 0.0,
+            "real_yield": round(float(last["RealYield"]), 2) if pd.notna(last["RealYield"]) else 0.0,
             "warn_score": ws,
             "is_earnings_season": earn_season,
             "light": light,
@@ -293,6 +339,11 @@ def compute_risk_data() -> dict:
             "move": [round(float(x), 2) for x in plot_df["MOVE"]],
             "hyg_lqd": [round(float(x), 4) for x in plot_df["hyg_lqd"]],
             "hyg_lqd_sma50": [round(float(x), 4) if pd.notna(x) else None for x in plot_df["hyg_lqd_sma50"]],
+            "qqq": [round(float(x), 2) for x in plot_df["QQQ"]],
+            "net_liq_b": [round(float(x), 1) if pd.notna(x) else None for x in plot_df["NetLiq_B"]],
+            "net_liq_lead60_b": [round(float(x), 1) if pd.notna(x) else None for x in plot_df["NetLiq_lead60_B"]],
+            "rrp_b": [round(float(x), 1) if pd.notna(x) else None for x in plot_df["RRP_B"]],
+            "real_yield": [round(float(x), 2) if pd.notna(x) else None for x in plot_df["RealYield"]],
             "hi_dates": [d.strftime("%Y-%m-%d") for d in hi_pts.index],
             "hi_soxl": [round(float(x), 2) for x in hi_pts["SOXL"]],
             "inv_dates": [d.strftime("%Y-%m-%d") for d in inv_pts.index],
@@ -354,7 +405,7 @@ def render_html(payload: dict) -> str:
       background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 18px;
       display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; align-items: center;
     }}
-    .kpi-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }}
+    .kpi-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }}
     .kpi {{
       background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px;
       display: flex; flex-direction: column; gap: 8px;
@@ -463,6 +514,20 @@ def render_html(payload: dict) -> str:
           <span class="card-sub">2022 加息 & 流动性抽水先知</span>
         </div>
         <div id="chartMacro" style="height:280px;"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">
+          <span>美元净流动性 (WALCL - TGA - RRP) vs QQQ</span>
+          <span class="card-sub">紫色虚线为净流动性右移 +60 天（领先 QQQ 约 60–75 天）</span>
+        </div>
+        <div id="chartNetLiq" style="height:290px;"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">
+          <span>10年期实际利率 (DFII10) & 逆回购缓冲垫 (ON RRP)</span>
+          <span class="card-sub">实际利率领先 QQQ 约 30 天负相关 · RRP 归零意味着缓冲垫耗尽</span>
+        </div>
+        <div id="chartRealYield" style="height:290px;"></div>
       </div>
     </div>
 
@@ -667,6 +732,30 @@ def render_html(payload: dict) -> str:
         role: "实时扫描主流外媒中关税、战争、芯片管制与央行冲击密度。",
         usage: "配合期权看：新闻热+期权绿灯=口水战；新闻热+期权红灯=真避险共振。",
       }},
+      {{
+        title: "美元净流动性 60日增速",
+        val: RISK_LIVE.net_liq_chg60,
+        valText: (RISK_LIVE.net_liq_chg60 >= 0 ? "+" : "") + RISK_LIVE.net_liq_chg60.toFixed(2) + "%",
+        min: -6.0, max: 6.0, minLabel: "-6% 抽水", maxLabel: "+6% 放水",
+        zones: [{{ from: -6.0, to: -1.0, color: R }}, {{ from: -1.0, to: 1.0, color: Y }}, {{ from: 1.0, to: 6.0, color: G }}],
+        status: RISK_LIVE.net_liq_chg60 > 1.0 ? "绿灯放水" : RISK_LIVE.net_liq_chg60 < -1.0 ? "红灯抽水" : "黄灯走平",
+        tone: RISK_LIVE.net_liq_chg60 > 1.0 ? "buy" : RISK_LIVE.net_liq_chg60 < -1.0 ? "sell" : "hold",
+        sub: `当前水位 $${{RISK_LIVE.net_liq_b.toLocaleString("en-US")}}B · RRP=$${{RISK_LIVE.rrp_b}}B`,
+        role: "追踪美联储真实可用水位 (WALCL-TGA-RRP)，领先 QQQ 约 60–75 天。",
+        usage: "扩张期 SOXL/BTC 胜率与收益远高于收缩期；若持续抽水且 RRP 归零需控仓。",
+      }},
+      {{
+        title: "10年期实际利率 (DFII10)",
+        val: RISK_LIVE.real_yield,
+        valText: RISK_LIVE.real_yield.toFixed(2) + "%",
+        min: -1.0, max: 3.5, minLabel: "-1% 宽松", maxLabel: "+3.5% 高压",
+        zones: [{{ from: -1.0, to: 1.0, color: G }}, {{ from: 1.0, to: 2.2, color: Y }}, {{ from: 2.2, to: 3.5, color: R }}],
+        status: RISK_LIVE.real_yield >= 2.2 ? "高压抽水" : RISK_LIVE.real_yield >= 1.0 ? "中性偏紧" : "绿灯宽松",
+        tone: RISK_LIVE.real_yield >= 2.2 ? "sell" : RISK_LIVE.real_yield >= 1.0 ? "hold" : "buy",
+        sub: "无风险真实利率 (领先科技股 QQQ 约 30 天呈负相关)",
+        role: "剔除通胀后的真实资金成本，飙升会直接压缩高估值科技股与 BTC 估值。",
+        usage: "≥2.2% 属于高利率压制区，高杠杆标的遇到反弹或高位亮灯时更易受挫。",
+      }},
     ];
 
     function badgeStyle(tone) {{
@@ -734,6 +823,27 @@ def render_html(payload: dict) -> str:
       margin: {{ l: 50, r: 45, t: 10, b: 28 }},
       yaxis: {{ gridcolor: "rgba(52,59,79,0.45)" }},
       yaxis2: {{ overlaying: "y", side: "right", showgrid: false }},
+    }}, {{ responsive: true }});
+
+    Plotly.newPlot("chartNetLiq", [
+      {{ type: "scatter", mode: "lines", name: "美元净流动性 ($B)", x: S.dates, y: S.net_liq_b, line: {{ color: "#14CA74", width: 1.8 }}, yaxis: "y" }},
+      {{ type: "scatter", mode: "lines", name: "净流动性 (领先+60天)", x: S.dates, y: S.net_liq_lead60_b, line: {{ color: "#CB3CFF", width: 1.4, dash: "dot" }}, yaxis: "y" }},
+      {{ type: "scatter", mode: "lines", name: "QQQ (右轴)", x: S.dates, y: S.qqq, line: {{ color: "#00C2FF", width: 1.6 }}, yaxis: "y2" }},
+    ], {{
+      ...baseLayout,
+      margin: {{ l: 55, r: 48, t: 10, b: 28 }},
+      yaxis: {{ gridcolor: "rgba(52,59,79,0.45)", tickprefix: "$", ticksuffix: "B" }},
+      yaxis2: {{ overlaying: "y", side: "right", showgrid: false, tickprefix: "$" }},
+    }}, {{ responsive: true }});
+
+    Plotly.newPlot("chartRealYield", [
+      {{ type: "scatter", mode: "lines", name: "10年期实际利率 DFII10 (%)", x: S.dates, y: S.real_yield, line: {{ color: "#FF5A79", width: 1.8 }}, yaxis: "y" }},
+      {{ type: "scatter", mode: "lines", name: "逆回购 ON RRP ($B, 右轴)", x: S.dates, y: S.rrp_b, line: {{ color: "#FDB52A", width: 1.5 }}, yaxis: "y2" }},
+    ], {{
+      ...baseLayout,
+      margin: {{ l: 48, r: 52, t: 10, b: 28 }},
+      yaxis: {{ gridcolor: "rgba(52,59,79,0.45)", ticksuffix: "%" }},
+      yaxis2: {{ overlaying: "y", side: "right", showgrid: false, tickprefix: "$", ticksuffix: "B" }},
     }}, {{ responsive: true }});
 
     // News Table
