@@ -93,7 +93,7 @@ def build_monthly_and_weekly(df: pd.DataFrame) -> tuple[list[dict], list[dict]]:
     return monthly_records, weekly_sma_records
 
 
-def _agg_periodic(daily_idx_df: pd.DataFrame, freq: str) -> pd.DataFrame:
+def _agg_periodic(daily_idx_df: pd.DataFrame, freq: str, drop_incomplete: bool = True) -> pd.DataFrame:
     with_dt = daily_idx_df.assign(_dt=daily_idx_df.index)
     grouped = (
         with_dt.groupby(pd.Grouper(freq=freq))
@@ -101,7 +101,20 @@ def _agg_periodic(daily_idx_df: pd.DataFrame, freq: str) -> pd.DataFrame:
         .dropna(subset=["Open", "Close", "_dt"])
     )
     grouped.index = pd.DatetimeIndex(grouped["_dt"])
-    return grouped.drop(columns=["_dt"])
+    grouped = grouped.drop(columns=["_dt"])
+    if drop_incomplete and len(grouped) > 1:
+        last_dt = pd.Timestamp(grouped.index[-1]).normalize()
+        today = pd.Timestamp.today().normalize()
+        if freq == "W-FRI":
+            if last_dt.weekday() < 4:
+                week_friday = last_dt + pd.Timedelta(days=(4 - last_dt.weekday()))
+                if today <= week_friday:
+                    grouped = grouped.iloc[:-1]
+        elif freq == "ME":
+            month_end = (last_dt + pd.offsets.MonthEnd(0)).normalize()
+            if last_dt < month_end and today <= month_end:
+                grouped = grouped.iloc[:-1]
+    return grouped
 
 
 def build_causal_features(df_soxl: pd.DataFrame, df_smh: pd.DataFrame) -> dict:
