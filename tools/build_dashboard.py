@@ -20,6 +20,49 @@ def _extract_json_var(html_path: Path, var_name: str) -> dict | list | None:
     return json.loads(m.group(1))
 
 
+def _build_monthly_curve(monthly: list[dict], trades: list[dict], start_ym: str = "2015-01") -> list[dict]:
+    """Reconstruct an approximate month-end equity curve from MONTHLY OHLC and trades."""
+    if not monthly:
+        return []
+    months = [m for m in monthly if m.get("m", "") >= start_ym]
+    if not months:
+        return []
+
+    eq = 10000.0
+    curve: list[dict] = []
+    # Track trades by index; ignore any trade that already exited before start_ym.
+    relevant = [t for t in trades if t.get("is_open") or (t.get("exit_m") or "") >= start_ym]
+    closed_ids: set[int] = set()
+
+    for m_row in months:
+        ym = m_row["m"]
+        # Apply any trades that closed in this month.
+        for idx, t in enumerate(relevant):
+            if idx not in closed_ids and not t.get("is_open") and t.get("exit_m") == ym:
+                eq *= 1.0 + float(t.get("ret_pct", 0.0)) / 100.0
+                closed_ids.add(idx)
+
+        # Check if a trade is held at the end of this month.
+        active = None
+        for idx, t in enumerate(relevant):
+            if idx in closed_ids:
+                continue
+            em = t.get("entry_m") or ""
+            xm = t.get("exit_m") or ""
+            if em <= ym and (t.get("is_open") or ym < xm):
+                active = t
+                break
+
+        if active is not None:
+            entry_px = float(active.get("avg_entry_px") or active.get("entry_px") or 0.0)
+            m_close = float(m_row.get("c") or 0.0)
+            val = eq * (m_close / entry_px) * 0.9995 if entry_px > 0 and m_close > 0 else eq
+        else:
+            val = eq
+        curve.append({"d": f"{ym}-28", "v": round(val, 2)})
+    return curve
+
+
 def collect_portal_data() -> dict:
     """Read live status and stats from existing generated HTMLs (read-only)."""
     cards = []
@@ -31,6 +74,10 @@ def collect_portal_data() -> dict:
         s_obj = st_map.get(strat_id) or (next(iter(st_map.values())) if st_map else {})
         ls = s_obj.get("live_status", {})
         stats = s_obj.get("stats", {})
+        curve = s_obj.get("equity_curve") or _build_monthly_curve(
+            _extract_json_var(p, "MONTHLY") or [],
+            s_obj.get("trades", []),
+        )
         cards.append({
             "key": key,
             "title": title,
@@ -49,12 +96,12 @@ def collect_portal_data() -> dict:
             "calmar": stats.get("calmar", 0.0),
             "win_rate": stats.get("win_rate", 0.0),
             "trades": stats.get("trades", 0),
-            "curve": s_obj.get("equity_curve", []),
+            "curve": curve,
             "extra": lm.get("btc_live") or lm.get("mstr_live") or {},
         })
 
     add_zone_page("SOXL", "SOXL 半导体三倍", "soxl_monthly_zones.html", "C2_F1_or_MFishLin_TP3h", "#CB3CFF")
-    add_zone_page("BTC", "BTC 减半周期", "btc_monthly_zones.html", "BTC_Halv_HV_Combo", "#00C2FF")
+    add_zone_page("BTC", "BTC 减半周期", "btc_monthly_zones.html", "BTC_Halv_HV_Combo", "#FDB52A")
     add_zone_page("MSTR", "MSTR mNAV脉冲", "mstr_monthly_zones.html", "Halv_mNAV_Spike170", "#9A91FB")
     add_zone_page("TECL", "TECL (SOXL驱动)", "tecl_monthly_zones.html", "SOXL_H5_to_TECL", "#14CA74")
     add_zone_page("TQQQ", "TQQQ (SOXL驱动)", "tqqq_monthly_zones.html", "SOXL_H5_to_TQQQ", "#FDB52A")
