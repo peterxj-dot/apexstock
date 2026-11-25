@@ -137,7 +137,8 @@ def collect_portal_data() -> dict:
             "extra": {"max_debt_ratio": st30.get("max_debt_ratio", 0.0)},
         })
 
-    return {"cards": cards}
+    risk_live = _extract_json_var(ROOT / "risk_radar.html", "RISK_LIVE") or {}
+    return {"cards": cards, "risk_live": risk_live}
 
 
 def render_dashboard(portal_data: dict) -> str:
@@ -431,6 +432,7 @@ def render_dashboard(portal_data: dict) -> str:
       {{ id: "tqqq_monthly_zones.html", label: "TQQQ (SOXL驱动)", dot: "#FDB52A" }},
       {{ id: "btc_monthly_zones.html", label: "BTC 减半周期", dot: "#00C2FF" }},
       {{ id: "mstr_monthly_zones.html", label: "MSTR mNAV脉冲", dot: "#9A91FB" }},
+      {{ id: "risk_radar.html", label: "风险雷达 (期权+新闻)", dot: "#FF5A79" }},
       {{ id: "chart.html", label: "基础K线对比 (chart)", dot: "#7E89AC" }},
     ];
 
@@ -531,17 +533,19 @@ def render_dashboard(portal_data: dict) -> str:
         xaxis: {{ gridcolor: "transparent" }},
       }}, {{ responsive: true }});
 
-      // Halving Radar Mini
+      // Halving Radar Mini + Risk Radar Summary
       const btcCard = CARDS.find(c => c.key === "BTC");
       const mstrCard = CARDS.find(c => c.key === "MSTR");
+      const rl = PORTAL.risk_live || {{}};
       if (btcCard && btcCard.extra) {{
         const ex = btcCard.extra;
+        const rlColor = rl.light_tone === "sell" ? "var(--red)" : rl.light_tone === "hold" ? "var(--amber)" : "var(--green)";
         document.getElementById("halvTag").textContent = ex.in_buy_zone ? "处于买点区" : "周期监控中";
         document.getElementById("radarMini").innerHTML = `
           <div>• 距离下次减半: <b style="color:var(--cyan);">-${{ex.du}} 天</b> (上次 +${{ex.ds}} 天)</div>
           <div>• BTC 波动率比: <b>${{ex.hv_ratio}}</b> (触发冷却需 &lt; 1.0，或 H-490d 兜底)</div>
           <div>• MSTR mNAV脉冲: <b>${{mstrCard && mstrCard.extra ? mstrCard.extra.mstr_btc_r60 : "-"}}x</b> (逃顶阈值 ≥ 1.70x)</div>
-          <div>• 通知链路: <span style="color:var(--green);">Telegram + Pushover 强提醒已就绪</span></div>
+          <div>• 期权&新闻风险雷达: <b style="color:${{rlColor}};cursor:pointer;text-decoration:underline;" onclick="openPage('risk_radar.html')">${{rl.light_label || "点击查看"}}</b> (VIX/3M=${{rl.vix_ratio || "-"}}, 热度=${{rl.news_heat ?? "-"}}/100)</div>
         `;
       }}
 
