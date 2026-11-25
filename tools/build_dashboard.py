@@ -515,6 +515,7 @@ def render_dashboard(portal_data: dict) -> str:
       }}, {{ responsive: true }});
 
       // CAGR Bar chart
+      const maxCagr = Math.max(...CARDS.map(c => c.cagr), 100);
       Plotly.newPlot("cagrChart", [{{
         type: "bar",
         x: CARDS.map(c => c.key),
@@ -522,10 +523,11 @@ def render_dashboard(portal_data: dict) -> str:
         marker: {{ color: CARDS.map(c => c.accent) }},
         text: CARDS.map(c => c.cagr.toFixed(0) + "%"),
         textposition: "outside",
+        cliponaxis: false,
       }}], {{
         paper_bgcolor: "#0B1739", plot_bgcolor: "#0B1739", font: {{ color: "#D1DBF9", size: 11 }},
-        margin: {{ l: 32, r: 10, t: 18, b: 26 }},
-        yaxis: {{ gridcolor: "rgba(52,59,79,0.45)", ticksuffix: "%" }},
+        margin: {{ l: 40, r: 10, t: 26, b: 26 }},
+        yaxis: {{ gridcolor: "rgba(52,59,79,0.45)", ticksuffix: "%", range: [0, maxCagr * 1.18] }},
         xaxis: {{ gridcolor: "transparent" }},
       }}, {{ responsive: true }});
 
