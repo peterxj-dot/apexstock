@@ -433,6 +433,7 @@ def render_dashboard(portal_data: dict) -> str:
       {{ id: "btc_monthly_zones.html", label: "BTC 减半周期", dot: "#00C2FF" }},
       {{ id: "mstr_monthly_zones.html", label: "MSTR mNAV脉冲", dot: "#9A91FB" }},
       {{ id: "risk_radar.html", label: "风险雷达 (期权+新闻)", dot: "#FF5A79" }},
+      {{ id: "panic_bottom_radar.html", label: "恐慌底部状态机", dot: "#14CA74" }},
       {{ id: "chart.html", label: "基础K线对比 (chart)", dot: "#7E89AC" }},
     ];
 
