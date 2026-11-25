@@ -2793,6 +2793,28 @@ def send_tg_notification(message: str, timeout: int = 10) -> bool:
         print("[Telegram] Missing TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID and apex/utils/notifier.py not found.")
         return False
 
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    safe_msg = f"<b>[APEXSTOCK]</b>\n{html_lib.escape(message)}"[:4000]
+    data = urllib.parse.urlencode({"chat_id": chat_id, "text": safe_msg, "parse_mode": "HTML"}).encode("utf-8")
+    req = urllib.request.Request(url, data=data)
+
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status == 200:
+                    return True
+        except urllib.error.URLError as e:
+            if hasattr(e, "reason") and isinstance(e.reason, ssl.SSLCertVerificationError):
+                ctx = ssl._create_unverified_context()
+                with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
+                    if resp.status == 200:
+                        return True
+            time.sleep(2 * (attempt + 1))
+        except Exception as e:
+            print(f"[Telegram] Send attempt {attempt + 1} failed: {e}")
+            time.sleep(2 * (attempt + 1))
+    return False
+
 
 def send_pushover_notification(
     title: str,
