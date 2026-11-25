@@ -212,6 +212,11 @@ def compute_risk_data() -> dict:
     )
     df["high_alt"] = df["SMH"] > df["smh_sma200"] * 1.05
     df["high_alt_warn"] = df["high_alt"] & ((df["vix_ratio"] >= 1.00) | (df["sig_vxn_spike"] & df["sig_credit_weak"]))
+    df["smh_ema5"] = df["SMH"].ewm(span=5, adjust=False).mean()
+    df["vr_5d_max"] = df["vix_ratio"].rolling(5).max()
+    df["is_q1"] = (df["vix_ratio"] >= 1.00) & (df["iv_hv_spread"] >= 4.0)
+    df["is_q2"] = (df["vix_ratio"] >= 1.00) & (df["iv_hv_spread"] < 0.0)
+    df["is_deep_q2"] = (df["vix_ratio"] >= 1.00) & (df["iv_hv_spread"] <= -8.0)
 
     # Macro Liquidity (FRED: WALCL - TGA - ON RRP, causal +1d release lag for weekly Fed data)
     walcl = _load_fred_series("WALCL")
@@ -248,14 +253,19 @@ def compute_risk_data() -> dict:
     earn_season = is_earnings_season(last_dt)
     smh_above_200_pct = (last["SMH"] / last["smh_sma200"] - 1.0) * 100.0
 
-    # Traffic light logic
+    # Traffic light logic (split high-altitude warning vs low-altitude panic capitulation)
     ws = int(last["warn_score"])
     vr = float(last["vix_ratio"])
-    if ws >= 3 or (ws >= 2 and bool(last["high_alt"])):
+    if (ws >= 2 and bool(last["high_alt"])) or (ws >= 3 and float(last["SMH"]) >= float(last["smh_sma200"])):
         light = "RED"
-        light_label = "红灯高危"
+        light_label = "红灯高位预警"
         light_tone = "sell"
         action_hint = "机构期权与债市同步恐慌且处于高位区，建议立刻降杠杆（SOXL→SMH/现金）或买短期 Put 对冲"
+    elif (ws >= 3 or bool(last["is_q2"])) and float(last["SMH"]) < float(last["smh_sma200"]):
+        light = "PANIC_LOW"
+        light_label = "低位恐慌极值区"
+        light_tone = "hold"
+        action_hint = "SMH 已跌破200日线且期权进入恐慌释放区，切勿盲目杀跌；重点观察下方底部状态机等待 VIX/3M 拐头或 SMH 站上5日EMA"
     elif ws >= 1 or vr >= 0.95 or bool(last["sig_iv_hv"]):
         light = "YELLOW"
         light_label = "黄灯警戒"
@@ -275,15 +285,109 @@ def compute_risk_data() -> dict:
     if (heat >= 40 or geo_hits >= 3) and light == "GREEN":
         cross_title = "新闻热闹但期权未动（口水战/暂未定价恐慌）"
         cross_desc = f"当前地缘/关税/宏观新闻热度 {heat}/100（涉关税或地缘 {geo_hits} 条），但 VIX/VIX3M={vr:.3f} 且信用利差稳定，华尔街真金白银尚未大举避险，暂按绿灯观望。"
+    elif (heat >= 40 or geo_hits >= 3) and light == "PANIC_LOW":
+        cross_title = "新闻利空发酵 × 期权进入低位恐慌释放（盯底部拐点）"
+        cross_desc = f"新闻热度 {heat}/100 且期权倒挂（VIX/VIX3M={vr:.3f}），但 SMH 已在200日线下（{smh_above_200_pct:+.1f}%）且负溢价 {float(last['iv_hv_spread']):+.1f}，属恐慌释放中后期，配合下方底部状态机盯买点。"
     elif (heat >= 40 or geo_hits >= 3) and light in {"YELLOW", "RED"}:
         cross_title = "新闻升级 × 期权/债市共振（高度警惕）"
         cross_desc = f"政策/地缘新闻热度 {heat}/100 与期权/信用指标同步亮灯（warn_score={ws}/4, VIX/VIX3M={vr:.3f}），属于真金白银避险确认，建议严格控杠杆或对冲。"
-    elif heat < 40 and light in {"YELLOW", "RED"}:
+    elif heat < 40 and light in {"YELLOW", "RED", "PANIC_LOW"}:
         cross_title = "新闻平静但期权/债市先动（隐蔽流动性异动）"
         cross_desc = f"新闻面尚温和（热度 {heat}/100），但期权/信用层面已出现异动（warn_score={ws}/4, VIX/VIX3M={vr:.3f}），注意防慢发酵宏观风险。"
     else:
         cross_title = "新闻与期权双静默（常态运行）"
         cross_desc = f"新闻风险热度 {heat}/100，VIX/VIX3M={vr:.3f}，市场无系统性抢买保险迹象。"
+
+    # Recent 20-day Panic Evolution & Cycle Bottom State Machine
+    recent20 = df.tail(20)
+    recent15 = df.tail(15)
+    q1_days_20d = int(recent20["is_q1"].sum())
+    q2_days_20d = int(recent20["is_q2"].sum())
+    deep_q2_hit_20d = bool(recent20["is_deep_q2"].any())
+    min_sp_20d = round(float(recent20["iv_hv_spread"].min()), 1)
+    min_sp_date = recent20["iv_hv_spread"].idxmin().strftime("%Y-%m-%d")
+    max_vr_20d = round(float(recent20["vix_ratio"].max()), 3)
+    max_vr_date = recent20["vix_ratio"].idxmax().strftime("%Y-%m-%d")
+    vr_turned_down = bool(vr < float(last["vr_5d_max"]) * 0.96)
+    vr_uninverted = bool(deep_q2_hit_20d and vr < 1.00)
+    smh_above_ema5 = bool(float(last["SMH"]) > float(last["smh_ema5"]))
+    soxl_dd_20d = round(float((float(last["SOXL"]) / float(recent20["SOXL"].max()) - 1.0) * 100.0), 1)
+    smh_dd_20d = round(float((float(last["SMH"]) / float(recent20["SMH"].max()) - 1.0) * 100.0), 1)
+
+    if not deep_q2_hit_20d and q1_days_20d > 0 and float(last["iv_hv_spread"]) >= 4.0:
+        b_stage = "STAGE1_DROP"
+        b_label = "阶段1 · 主跌/保费飙升（严禁接飞刀）"
+        b_tone = "sell"
+        b_desc = "期权正溢价持续扩大，类似 2020-02/03-12 机构仍在加价买保险，尚未进入恐慌出清底。"
+    elif deep_q2_hit_20d and (vr_uninverted or (vr_turned_down and smh_above_ema5)):
+        b_stage = "STAGE4_CONFIRM"
+        b_label = "阶段4 · 恐慌底部右侧确认（可分批/配合主策略进场）"
+        b_tone = "buy"
+        b_desc = "已打出深度负溢价(≤-8)且期权恐慌退潮/现货站上5日EMA，历史5次真恐慌底均在此区间确立。"
+    elif deep_q2_hit_20d and (vr_turned_down or smh_above_ema5):
+        b_stage = "STAGE3_FORMING"
+        b_label = "阶段3 · 底部雏形初现（半左侧观察/轻仓试探）"
+        b_tone = "hold"
+        b_desc = "已满足深度负溢价(≤-8)并出现初步企稳信号，等待 VIX/3M 进一步回落或 SMH 站稳 5日EMA 确认。"
+    elif deep_q2_hit_20d:
+        b_stage = "STAGE2_CAPITULATION"
+        b_label = "阶段2 · 深度恐慌砸盘中（勿割肉 · 等拐头）"
+        b_tone = "hold"
+        b_desc = f"近20日已打出深度负溢价 {min_sp_20d:+.1f}（跨过 -8 真恐慌门槛），但 VIX/3M 尚未明显拐头且 SMH 未站上 5日EMA，参考 2020-03 / 2025-04 需耐心等右侧信号。"
+    else:
+        b_stage = "NORMAL"
+        b_label = "常态运行（无急跌恐慌底部形态）"
+        b_tone = "neutral"
+        b_desc = "近20日未出现 VIX倒挂 + 深度负溢价(≤-8) 急跌出清形态；注意慢熊底(如2022-10)需以主策略现货信号为准。"
+
+    b_steps = [
+        {"name": "1. 深度恐慌门槛 (SP ≤ -8)", "ok": deep_q2_hit_20d, "detail": f"近20日最低 {min_sp_20d:+.1f} ({min_sp_date})"},
+        {"name": "2. 恐慌退潮 (VIX/3M 距5日峰回落≥4%)", "ok": vr_turned_down, "detail": f"当前 {vr:.3f} vs 5日峰 {float(last['vr_5d_max']):.3f}"},
+        {"name": "3. 倒挂解除 (VIX/3M < 1.00)", "ok": vr_uninverted, "detail": f"当前 VIX/VIX3M = {vr:.3f}"},
+        {"name": "4. 现货止跌 (SMH > 5日EMA)", "ok": smh_above_ema5, "detail": f"SMH ${float(last['SMH']):.2f} vs 5EMA ${float(last['smh_ema5']):.2f}"},
+    ]
+
+    recent_rows = []
+    for dt, r in recent15.iloc[::-1].iterrows():
+        if bool(r["is_q1"]):
+            r_tag, r_tone = "Q1 高位/主跌警报", "sell"
+        elif bool(r["is_deep_q2"]):
+            r_tag, r_tone = "Q2 深度恐慌 (≤-8)", "hold"
+        elif bool(r["is_q2"]):
+            r_tag, r_tone = "Q2 恐慌释放", "hold"
+        elif float(r["SMH"]) > float(r["smh_ema5"]) and deep_q2_hit_20d:
+            r_tag, r_tone = "现货站上 5日EMA", "buy"
+        else:
+            r_tag, r_tone = "常态", "neutral"
+        recent_rows.append({
+            "date": dt.strftime("%Y-%m-%d"),
+            "qqq": round(float(r["QQQ"]), 2),
+            "smh": round(float(r["SMH"]), 2),
+            "soxl": round(float(r["SOXL"]), 2),
+            "vr": round(float(r["vix_ratio"]), 3),
+            "sp": round(float(r["iv_hv_spread"]), 1),
+            "smh_above_ema5": bool(float(r["SMH"]) > float(r["smh_ema5"])),
+            "tag": r_tag,
+            "tone": r_tone,
+        })
+
+    bottom_tracker = {
+        "stage": b_stage,
+        "stage_label": b_label,
+        "stage_tone": b_tone,
+        "stage_desc": b_desc,
+        "q1_days_20d": q1_days_20d,
+        "q2_days_20d": q2_days_20d,
+        "deep_q2_hit_20d": deep_q2_hit_20d,
+        "min_sp_20d": min_sp_20d,
+        "min_sp_date": min_sp_date,
+        "max_vr_20d": max_vr_20d,
+        "max_vr_date": max_vr_date,
+        "soxl_dd_20d": soxl_dd_20d,
+        "smh_dd_20d": smh_dd_20d,
+        "steps": b_steps,
+        "recent_rows": recent_rows,
+    }
 
     # Chart series from 2018-01-01 onward
     plot_df = df.loc["2018-01-01":].copy()
@@ -330,6 +434,7 @@ def compute_risk_data() -> dict:
             },
         },
         "news": news,
+        "bottom_tracker": bottom_tracker,
         "series": {
             "dates": dates,
             "soxl": [round(float(x), 2) for x in plot_df["SOXL"]],
@@ -355,6 +460,7 @@ def compute_risk_data() -> dict:
 def render_html(payload: dict) -> str:
     live_json = json.dumps(payload["live"], separators=(",", ":"), ensure_ascii=False)
     news_json = json.dumps(payload["news"], separators=(",", ":"), ensure_ascii=False)
+    bottom_json = json.dumps(payload["bottom_tracker"], separators=(",", ":"), ensure_ascii=False)
     series_json = json.dumps(payload["series"], separators=(",", ":"), ensure_ascii=False)
 
     return f"""<!DOCTYPE html>
@@ -447,12 +553,22 @@ def render_html(payload: dict) -> str:
     }}
     .tag-hot {{ background: rgba(255,90,121,0.16); color: var(--red); border-color: rgba(255,90,121,0.35); }}
 
+    .steps-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 10px 0 12px; }}
+    .step-box {{
+      background: rgba(8,16,40,0.6); border: 1px solid var(--border); border-radius: 9px; padding: 9px 11px;
+    }}
+    .step-box.ok {{ border-color: rgba(20,202,116,0.55); background: rgba(20,202,116,0.08); }}
+    .step-top {{ font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 6px; }}
+    .step-sub {{ font-size: 11px; color: var(--muted); margin-top: 3px; }}
+    .recent-wrap {{ max-height: 290px; overflow-y: auto; border: 1px solid rgba(52,59,79,0.5); border-radius: 8px; }}
+
     @media (max-width: 1200px) {{
       .kpi-grid {{ grid-template-columns: repeat(2, 1fr); }}
+      .steps-grid {{ grid-template-columns: repeat(2, 1fr); }}
       .charts-grid, .cross-box {{ grid-template-columns: 1fr; }}
     }}
     @media (max-width: 680px) {{
-      .kpi-grid {{ grid-template-columns: 1fr; }}
+      .kpi-grid, .steps-grid {{ grid-template-columns: 1fr; }}
     }}
   </style>
 </head>
@@ -481,6 +597,35 @@ def render_html(payload: dict) -> str:
       <div style="border-left:1px solid var(--border);padding-left:16px;">
         <div style="font-size:11px;color:var(--muted);margin-bottom:4px;">操作建议（仅作风控雷达，不直接全自动清仓）</div>
         <div style="font-size:12px;color:var(--text);" id="actionHint"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">
+        <span style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <span>近期 20 日恐慌演化 &amp; 周期底部状态机</span>
+          <span id="bottomStagePill" class="pill"></span>
+        </span>
+        <span class="card-sub" id="bottomSummary"></span>
+      </div>
+      <div style="font-size:12px;color:var(--text-sec);" id="bottomDesc"></div>
+      <div class="steps-grid" id="bottomSteps"></div>
+      <div class="recent-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>日期</th>
+              <th>QQQ</th>
+              <th>SMH</th>
+              <th>SOXL</th>
+              <th>VIX/3M</th>
+              <th>VXN-HV20</th>
+              <th>SMH vs 5EMA</th>
+              <th>当日状态</th>
+            </tr>
+          </thead>
+          <tbody id="recentBody"></tbody>
+        </table>
       </div>
     </div>
 
@@ -611,6 +756,7 @@ def render_html(payload: dict) -> str:
   <script>
     const RISK_LIVE = {live_json};
     const NEWS = {news_json};
+    const BOTTOM_TRACKER = {bottom_json};
     const S = {series_json};
 
     // Header
@@ -625,6 +771,42 @@ def render_html(payload: dict) -> str:
     document.getElementById("crossTitle").textContent = RISK_LIVE.cross_title;
     document.getElementById("crossDesc").textContent = RISK_LIVE.cross_desc;
     document.getElementById("actionHint").textContent = RISK_LIVE.action_hint;
+
+    // Bottom Tracker & Recent 15 Days
+    const bp = document.getElementById("bottomStagePill");
+    bp.textContent = BOTTOM_TRACKER.stage_label;
+    bp.className = "pill " + (BOTTOM_TRACKER.stage_tone === "sell" ? "pill-sell" : BOTTOM_TRACKER.stage_tone === "hold" ? "pill-hold" : BOTTOM_TRACKER.stage_tone === "buy" ? "pill-buy" : "pill-neutral");
+    document.getElementById("bottomSummary").textContent =
+      `20日回撤: SOXL ${{BOTTOM_TRACKER.soxl_dd_20d}}% / SMH ${{BOTTOM_TRACKER.smh_dd_20d}}% · Q1=${{BOTTOM_TRACKER.q1_days_20d}}天 · Q2=${{BOTTOM_TRACKER.q2_days_20d}}天 · VIX/3M峰=${{BOTTOM_TRACKER.max_vr_20d}} (${{BOTTOM_TRACKER.max_vr_date}})`;
+    document.getElementById("bottomDesc").textContent = BOTTOM_TRACKER.stage_desc;
+    document.getElementById("bottomSteps").innerHTML = (BOTTOM_TRACKER.steps || []).map(st => `
+      <div class="step-box ${{st.ok ? "ok" : ""}}">
+        <div class="step-top" style="color:${{st.ok ? "var(--green)" : "var(--text-sec)"}};">
+          <span>${{st.ok ? "✓" : "○"}}</span>
+          <span>${{st.name}}</span>
+        </div>
+        <div class="step-sub">${{st.detail}}</div>
+      </div>
+    `).join("");
+
+    function pillCls(tone) {{
+      if (tone === "sell") return "pill-sell";
+      if (tone === "hold") return "pill-hold";
+      if (tone === "buy") return "pill-buy";
+      return "pill-neutral";
+    }}
+    document.getElementById("recentBody").innerHTML = (BOTTOM_TRACKER.recent_rows || []).map(r => `
+      <tr>
+        <td style="white-space:nowrap;">${{r.date}}</td>
+        <td>$${{r.qqq.toFixed(2)}}</td>
+        <td>$${{r.smh.toFixed(2)}}</td>
+        <td>$${{r.soxl.toFixed(2)}}</td>
+        <td style="color:${{r.vr >= 1.0 ? "var(--red)" : r.vr >= 0.95 ? "var(--amber)" : "var(--green)"}};font-weight:600;">${{r.vr.toFixed(3)}}</td>
+        <td style="color:${{r.sp <= -8 ? "var(--amber)" : r.sp >= 4 ? "var(--red)" : "var(--text-sec)"}};font-weight:600;">${{r.sp >= 0 ? "+" : ""}}${{r.sp.toFixed(1)}}</td>
+        <td style="color:${{r.smh_above_ema5 ? "var(--green)" : "var(--muted)"}};">${{r.smh_above_ema5 ? "站上 ✓" : "下方"}}</td>
+        <td><span class="pill ${{pillCls(r.tone)}}" style="padding:2px 8px;font-size:11px;">${{r.tag}}</span></td>
+      </tr>
+    `).join("");
 
     // Speedometer Gauge helper (SVG semi-circle with green/amber/red zones + needle)
     function polarPt(cx, cy, r, frac) {{
