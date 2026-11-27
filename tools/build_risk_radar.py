@@ -398,6 +398,11 @@ def compute_risk_data() -> dict:
     plot_df = df.loc["2018-01-01":].copy()
     dates = [d.strftime("%Y-%m-%d") for d in plot_df.index]
 
+    lead_src = df.loc["2017-11-01":, "NetLiq_B"].dropna()
+    net_liq_lead60_dates = [(d + pd.Timedelta(days=60)).strftime("%Y-%m-%d") for d in lead_src.index]
+    net_liq_lead60_vals = [round(float(x), 1) for x in lead_src]
+    future_end_date = (last_dt + pd.Timedelta(days=60)).strftime("%Y-%m-%d")
+
     hi_pts = plot_df[plot_df["high_alt_warn"]]
     inv_pts = plot_df[plot_df["sig_vix_inv"]]
 
@@ -452,6 +457,9 @@ def compute_risk_data() -> dict:
             "qqq": [round(float(x), 2) for x in plot_df["QQQ"]],
             "net_liq_b": [round(float(x), 1) if pd.notna(x) else None for x in plot_df["NetLiq_B"]],
             "net_liq_lead60_b": [round(float(x), 1) if pd.notna(x) else None for x in plot_df["NetLiq_lead60_B"]],
+            "net_liq_lead60_dates": net_liq_lead60_dates,
+            "net_liq_lead60_vals": net_liq_lead60_vals,
+            "future_end_date": future_end_date,
             "rrp_b": [round(float(x), 1) if pd.notna(x) else None for x in plot_df["RRP_B"]],
             "real_yield": [round(float(x), 2) if pd.notna(x) else None for x in plot_df["RealYield"]],
             "hi_dates": [d.strftime("%Y-%m-%d") for d in hi_pts.index],
@@ -1091,13 +1099,58 @@ def render_html(payload: dict) -> str:
 
     Plotly.newPlot("chartNetLiq", [
       {{ type: "scatter", mode: "lines", name: "美元净流动性 ($B)", x: S.dates, y: S.net_liq_b, line: {{ color: "#14CA74", width: 1.8 }}, yaxis: "y" }},
-      {{ type: "scatter", mode: "lines", name: "净流动性 (领先+60天)", x: S.dates, y: S.net_liq_lead60_b, line: {{ color: "#CB3CFF", width: 1.4, dash: "dot" }}, yaxis: "y" }},
+      {{ type: "scatter", mode: "lines", name: "净流动性 (领先+60天，向右延伸至未来)", x: S.net_liq_lead60_dates, y: S.net_liq_lead60_vals, line: {{ color: "#CB3CFF", width: 1.8, dash: "dot" }}, yaxis: "y" }},
       {{ type: "scatter", mode: "lines", name: "QQQ (右轴)", x: S.dates, y: S.qqq, line: {{ color: "#00C2FF", width: 1.6 }}, yaxis: "y2" }},
     ], {{
       ...baseLayout,
-      margin: {{ l: 55, r: 48, t: 10, b: 28 }},
+      margin: {{ l: 55, r: 48, t: 32, b: 28 }},
+      xaxis: {{
+        ...baseLayout.xaxis,
+        autorange: true,
+        rangeselector: {{
+          bgcolor: "#1B223B",
+          activecolor: "#CB3CFF",
+          bordercolor: "rgba(126,137,172,0.35)",
+          font: {{ color: "#E6ECFF", size: 11 }},
+          buttons: [
+            {{ count: 6, label: "6个月", step: "month", stepmode: "backward" }},
+            {{ count: 1, label: "1年", step: "year", stepmode: "backward" }},
+            {{ count: 2, label: "2年", step: "year", stepmode: "backward" }},
+            {{ step: "all", label: "全部" }},
+          ],
+        }},
+      }},
       yaxis: {{ gridcolor: "rgba(52,59,79,0.45)", tickprefix: "$", ticksuffix: "B" }},
       yaxis2: {{ overlaying: "y", side: "right", showgrid: false, tickprefix: "$" }},
+      shapes: [
+        {{
+          type: "rect",
+          xref: "x", yref: "paper",
+          x0: RISK_LIVE.last_date, x1: S.future_end_date,
+          y0: 0, y1: 1,
+          fillcolor: "rgba(203,60,255,0.08)",
+          line: {{ width: 0 }},
+          layer: "below",
+        }},
+        {{
+          type: "line",
+          xref: "x", yref: "paper",
+          x0: RISK_LIVE.last_date, x1: RISK_LIVE.last_date,
+          y0: 0, y1: 1,
+          line: {{ color: "rgba(203,60,255,0.65)", width: 1.2, dash: "dash" }},
+        }},
+      ],
+      annotations: [
+        {{
+          x: RISK_LIVE.last_date, y: 0.99,
+          xref: "x", yref: "paper",
+          xanchor: "left", yanchor: "top",
+          text: " 未来+60天流动性指引 →",
+          showarrow: false,
+          font: {{ size: 11, color: "#E5A5FF" }},
+          bgcolor: "rgba(13,17,23,0.75)",
+        }},
+      ],
     }}, {{ responsive: true }});
 
     Plotly.newPlot("chartRealYield", [

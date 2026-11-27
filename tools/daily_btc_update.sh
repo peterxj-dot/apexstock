@@ -45,12 +45,17 @@ fi
   echo "============================================================"
   echo "[START] Local: $(date '+%Y-%m-%d %H:%M:%S %Z') | UTC: $UTC_STR | Day: $UTC_DATE"
   cd "$ROOT"
-  "$PYTHON_BIN" "$ROOT/tools/download_data.py" --tickers "BTC-USD,MSTR,QQQ,SMH,SOXL,^VIX,^VIX3M,^VXN,^MOVE,HYG,LQD"
-  for fred_id in WALCL WTREGEN RRPONTSYD DFII10; do
+  "$PYTHON_BIN" "$ROOT/tools/download_data.py" --tickers "BTC-USD,MSTR,QQQ,TQQQ,SMH,SOXL,TECL,VGT,^VIX,^VIX3M,^VXN,^MOVE,HYG,LQD"
+  for fred_id in WALCL WTREGEN RRPONTSYD M2SL DFII10; do
     curl -4 -sL --max-time 20 "https://fred.stlouisfed.org/graph/fredgraph.csv?id=${fred_id}&cosd=2013-01-01" -o "$ROOT/data/FRED_${fred_id}.csv" || true
   done
   "$PYTHON_BIN" "$ROOT/tools/build_btc_zones.py" --notify-tg
   "$PYTHON_BIN" "$ROOT/tools/build_mstr_zones.py" --notify-tg
+  "$PYTHON_BIN" "$ROOT/tools/build_soxl_zones.py"
+  "$PYTHON_BIN" "$ROOT/tools/build_tqqq_zones.py"
+  "$PYTHON_BIN" "$ROOT/tools/build_tecl_zones.py"
+  "$PYTHON_BIN" "$ROOT/tools/build_vgt_margin_compare.py"
+  "$PYTHON_BIN" "$ROOT/tools/build_chart.py"
   "$PYTHON_BIN" "$ROOT/tools/build_risk_radar.py"
   "$PYTHON_BIN" "$ROOT/tools/build_panic_bottom_radar.py"
   "$PYTHON_BIN" "$ROOT/tools/build_dashboard.py"

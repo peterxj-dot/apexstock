@@ -258,6 +258,185 @@ def build_live_market_snapshot(feats: dict) -> dict:
     }
 
 
+def build_soxl_deep85_gap_tracker(feats: dict) -> dict:
+    """Build strictly causal SOXL Deep85 weekly-light and true-breakdown gap tracker."""
+    daily: pd.DataFrame = feats["daily"]
+    w: pd.DataFrame = feats["weekly"]
+
+    armed_s = (w["pre_c7_vol"] & (w["Close_vs_52H%"] <= -85.0)).fillna(False)
+    w_last = w.iloc[-1]
+    w_date = str(w.index[-1].date())
+    pre_c7_ok = bool(w_last["pre_c7_vol"])
+    dd52_pct = _safe_num(w_last["Close_vs_52H%"], 1)
+    dd52_ok = bool(dd52_pct is not None and dd52_pct <= -85.0)
+    is_armed = bool(armed_s.iloc[-1])
+
+    armed_start_date = None
+    armed_weeks_count = 0
+    anchor_w_close = None
+    anchor_w_date = None
+
+    if is_armed:
+        streak_indices: list[int] = []
+        for wi in range(len(w) - 1, -1, -1):
+            if bool(armed_s.iloc[wi]):
+                streak_indices.append(wi)
+            else:
+                break
+        streak_indices.reverse()
+        armed_weeks_count = len(streak_indices)
+        armed_start_date = str(w.index[streak_indices[0]].date())
+        sub_w = w.iloc[streak_indices]
+        min_idx = sub_w["Close"].idxmin()
+        anchor_w_close = _safe_num(sub_w.loc[min_idx, "Close"], 2)
+        anchor_w_date = str(min_idx.date())
+
+    last_dt = daily.index[-1]
+    last_close = _safe_num(daily["Close"].iloc[-1], 2)
+    gap8_trigger_px = round(last_close * 0.92, 2) if last_close is not None else None
+    effective_open_max = (
+        round(min(gap8_trigger_px, anchor_w_close), 2)
+        if (is_armed and gap8_trigger_px is not None and anchor_w_close is not None)
+        else None
+    )
+
+    def _collect_daily_for_streak(w_pos_indices: list[int], end_dt: pd.Timestamp | None = None) -> list[dict]:
+        rows: list[dict] = []
+        start_w_ts = w.index[w_pos_indices[0]]
+        cur_anchor = float(w.iloc[w_pos_indices[0]]["Close"])
+        next_wi_ptr = 1
+
+        d_start_pos = int(daily.index.searchsorted(start_w_ts, side="right"))
+        d_end_pos = len(daily) - 1 if end_dt is None else int(daily.index.searchsorted(end_dt, side="right")) - 1
+
+        for d_pos in range(d_start_pos, d_end_pos + 1):
+            d_ts = daily.index[d_pos]
+            while next_wi_ptr < len(w_pos_indices) and d_ts > w.index[w_pos_indices[next_wi_ptr]]:
+                cur_anchor = min(cur_anchor, float(w.iloc[w_pos_indices[next_wi_ptr]]["Close"]))
+                next_wi_ptr += 1
+
+            prev_c = float(daily["Close"].iloc[d_pos - 1]) if d_pos > 0 else float(daily["Open"].iloc[d_pos])
+            o = float(daily["Open"].iloc[d_pos])
+            l = float(daily["Low"].iloc[d_pos])
+            c = float(daily["Close"].iloc[d_pos])
+            gap_pct = (o / prev_c - 1.0) * 100.0 if prev_c > 0 else 0.0
+            dip_from_open_pct = (l / o - 1.0) * 100.0 if o > 0 else 0.0
+            gap_ok = gap_pct <= -8.0
+            below_anchor = o <= cur_anchor
+            triggered = gap_ok and below_anchor
+
+            dip3_px = round(o * 0.97, 2)
+            dip5_px = round(o * 0.95, 2)
+            dip3_hit = bool(triggered and l <= dip3_px)
+            dip5_hit = bool(triggered and l <= dip5_px)
+
+            if triggered:
+                status_code = "TRIGGERED"
+                status_text = "⚡ 真破位跳空触发"
+            elif gap_ok and not below_anchor:
+                status_code = "BLOCKED_TRAP"
+                status_text = "🛡️ 假跳空拦截 (Open > 锚点)"
+            else:
+                status_code = "WAIT"
+                status_text = "○ 未低开 ≥ 8%"
+
+            rows.append({
+                "date": str(d_ts.date()),
+                "open": round(o, 2),
+                "low": round(l, 2),
+                "close": round(c, 2),
+                "anchor": round(cur_anchor, 2),
+                "gap_pct": round(gap_pct, 1),
+                "dip_open_pct": round(dip_from_open_pct, 1),
+                "gap_ok": bool(gap_ok),
+                "below_anchor": bool(below_anchor),
+                "triggered": bool(triggered),
+                "dip3_px": dip3_px,
+                "dip3_hit": dip3_hit,
+                "dip5_px": dip5_px,
+                "dip5_hit": dip5_hit,
+                "status_code": status_code,
+                "status_text": status_text,
+            })
+        return rows
+
+    daily_rows: list[dict] = []
+    triggered_days: list[dict] = []
+    latest_trigger = None
+    if is_armed:
+        all_rows = _collect_daily_for_streak(streak_indices)
+        triggered_days = [r for r in all_rows if r["triggered"]]
+        latest_trigger = triggered_days[-1] if triggered_days else None
+        daily_rows = all_rows[-15:]
+
+    if not is_armed:
+        stage_code = "OFF"
+        stage_label = "熄灭 · 未进入 Deep85 亮灯区"
+        stage_tone = "muted"
+    elif latest_trigger is None:
+        stage_code = "ARMED_WAIT"
+        stage_label = "🔥 已亮灯 · 等待开盘真破位跳空 (≤ -8%)"
+        stage_tone = "warn"
+    else:
+        stage_code = "TRIGGERED"
+        stage_label = "⚡ 已亮灯 · 本轮已触发真破位跳空信号"
+        stage_tone = "ready"
+
+    # Collect independent historical Deep85_Armed episodes (gap > 90 days)
+    armed_wis = [wi for wi in range(len(w)) if bool(armed_s.iloc[wi])]
+    episodes_wis: list[list[int]] = []
+    for wi in armed_wis:
+        if not episodes_wis or (w.index[wi] - w.index[episodes_wis[-1][-1]]).days > 90:
+            episodes_wis.append([wi])
+        else:
+            episodes_wis[-1].append(wi)
+
+    history_episodes: list[dict] = []
+    for ep_wis in episodes_wis:
+        first_wi = ep_wis[0]
+        last_wi = ep_wis[-1]
+        ep_end_dt = None if last_wi == len(w) - 1 else w.index[last_wi] + pd.Timedelta(days=7)
+        ep_daily = _collect_daily_for_streak(ep_wis, end_dt=ep_end_dt)
+        ep_trigs = [r for r in ep_daily if r["triggered"]]
+        ft = ep_trigs[0] if ep_trigs else None
+        history_episodes.append({
+            "armed_date": str(w.index[first_wi].date()),
+            "anchor_close": _safe_num(w.iloc[ep_wis]["Close"].min(), 2),
+            "first_trigger_date": ft["date"] if ft else None,
+            "trigger_open": ft["open"] if ft else None,
+            "trigger_gap_pct": ft["gap_pct"] if ft else None,
+            "trigger_low": ft["low"] if ft else None,
+            "dip3_hit": ft["dip3_hit"] if ft else False,
+            "dip5_hit": ft["dip5_hit"] if ft else False,
+            "dip5_px": ft["dip5_px"] if ft else None,
+        })
+
+    return {
+        "w_date": w_date,
+        "last_date": str(last_dt.date()),
+        "last_close": last_close,
+        "is_armed": is_armed,
+        "pre_c7_vol": pre_c7_ok,
+        "dd52_pct": dd52_pct,
+        "dd52_ok": dd52_ok,
+        "min8w_low_200w": _safe_num(w_last["min8w_Low_200W_ratio"], 2),
+        "min4w_wf": _safe_num(w_last["min4w_WF"], 2),
+        "max4w_vol_r": _safe_num(w_last["max4w_Vol_R"], 2),
+        "armed_start_date": armed_start_date,
+        "armed_weeks_count": armed_weeks_count,
+        "anchor_w_close": anchor_w_close,
+        "anchor_w_date": anchor_w_date,
+        "gap8_trigger_px": gap8_trigger_px,
+        "effective_open_max": effective_open_max,
+        "stage_code": stage_code,
+        "stage_label": stage_label,
+        "stage_tone": stage_tone,
+        "latest_trigger": latest_trigger,
+        "daily_rows": daily_rows,
+        "history_episodes": history_episodes,
+    }
+
+
 def _compute_stats(
     equity: np.ndarray,
     trades: list[dict],
@@ -2759,6 +2938,19 @@ def format_tg_summary(live_market: dict, strategies: dict[str, dict]) -> str:
         lines.append(
             f"• 入口3 (月Fisher兜底): {e2_done}/2 满足 (M_Fish={m['m_fish_prev']} vs Sig={m['m_fish_sig_prev']})"
         )
+        t = m.get("soxl_gap_tracker")
+        if t:
+            if t["is_armed"]:
+                trig_s = (
+                    f" | 已触发 {t['latest_trigger']['date']}@${t['latest_trigger']['open']:.2f}"
+                    if t.get("latest_trigger")
+                    else ""
+                )
+                lines.append(
+                    f"• Deep85亮灯(跳空接针): 🔥已亮灯(锚${t['anchor_w_close']:.2f}, {t['armed_start_date']}) | 明日开盘≤${t['effective_open_max']:.2f}触发真破位跳空{trig_s}"
+                )
+            else:
+                lines.append("• Deep85亮灯(跳空接针): 熄灭")
 
     lines.append("")
     for key, label in (
@@ -3012,7 +3204,218 @@ def main() -> None:
         )
 
     live_market = build_live_market_snapshot(feats)
+    live_market["soxl_gap_tracker"] = build_soxl_deep85_gap_tracker(feats)
     html = render_html(monthly, weekly_sma, c7_entries, strategies, live_market=live_market)
+
+    d85_css = """
+    .d85-light { margin: 12px 24px 0; background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 14px 16px; }
+    .d85-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; padding-bottom: 10px; border-bottom: 1px solid #21262d; }
+    .d85-title-wrap { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .d85-lamp { width: 12px; height: 12px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+    .d85-lamp.on { background: #3fb950; box-shadow: 0 0 10px rgba(63,185,80,0.85); }
+    .d85-lamp.warn { background: #f0883e; box-shadow: 0 0 10px rgba(240,136,62,0.85); }
+    .d85-lamp.off { background: #484f58; }
+    .d85-title { font-size: 14px; font-weight: 700; color: #f0f6fc; }
+    .d85-sub { font-size: 11px; color: #8b949e; background: #0d1117; border: 1px solid #30363d; border-radius: 999px; padding: 2px 8px; }
+    .d85-stage { font-size: 12px; font-weight: 600; border-radius: 6px; padding: 4px 10px; }
+    .d85-stage.muted { background: #21262d; color: #8b949e; border: 1px solid #30363d; }
+    .d85-stage.warn { background: rgba(240,136,62,0.14); color: #f0883e; border: 1px solid rgba(240,136,62,0.45); }
+    .d85-stage.ready { background: rgba(63,185,80,0.16); color: #3fb950; border: 1px solid rgba(63,185,80,0.45); }
+    .d85-cols { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+    @media (max-width: 980px) { .d85-cols { grid-template-columns: 1fr; } }
+    .d85-card { background: #0d1117; border: 1px solid #21262d; border-radius: 8px; padding: 11px 12px; }
+    .d85-card-h { font-size: 12px; font-weight: 600; color: #c9d1d9; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
+    .d85-item { font-size: 12px; padding: 6px 8px; border-radius: 6px; margin-bottom: 6px; border: 1px solid #21262d; background: #161b22; }
+    .d85-item.ok { border-color: rgba(63,185,80,0.4); background: rgba(63,185,80,0.08); }
+    .d85-item.warn { border-color: rgba(240,136,62,0.45); background: rgba(240,136,62,0.10); }
+    .d85-item.miss { border-color: #21262d; color: #8b949e; }
+    .d85-item-top { display: flex; justify-content: space-between; gap: 6px; font-weight: 600; }
+    .d85-item.ok .d85-item-top { color: #3fb950; }
+    .d85-item.warn .d85-item-top { color: #f0883e; }
+    .d85-item-val { font-size: 11px; color: #8b949e; margin-top: 3px; line-height: 1.45; }
+    .d85-bigpx { font-size: 20px; font-weight: 800; color: #3fb950; margin: 4px 0; }
+    .d85-bigpx.off { color: #8b949e; font-size: 15px; }
+    .d85-note { font-size: 11px; color: #8b949e; margin-top: 6px; line-height: 1.45; }
+    .d85-table-wrap { margin-top: 12px; overflow-x: auto; border: 1px solid #21262d; border-radius: 8px; }
+    .d85-table { width: 100%; border-collapse: collapse; font-size: 12px; background: #0d1117; }
+    .d85-table th, .d85-table td { padding: 6px 8px; text-align: right; border-bottom: 1px solid #21262d; white-space: nowrap; }
+    .d85-table th:first-child, .d85-table td:first-child, .d85-table th:last-child, .d85-table td:last-child { text-align: left; }
+    .d85-table th { color: #8b949e; font-weight: 600; background: #161b22; }
+    .d85-badge-trig { color: #3fb950; font-weight: 700; }
+    .d85-badge-trap { color: #f0883e; font-weight: 600; }
+    .d85-badge-wait { color: #8b949e; }
+    .d85-hist { margin-top: 8px; font-size: 11px; color: #8b949e; display: flex; flex-wrap: wrap; gap: 14px; }
+    .d85-hist b { color: #c9d1d9; }
+  </style>"""
+    assert "</style>" in html, "Missing </style> anchor"
+    html = html.replace("</style>", d85_css, 1)
+
+    cockpit_div = '<div id="liveCockpit" class="live-cockpit"></div>'
+    assert cockpit_div in html, "Missing liveCockpit anchor"
+    html = html.replace(cockpit_div, cockpit_div + '\n\n  <div id="soxlDeep85Light" class="d85-light"></div>', 1)
+
+    d85_js = """
+    function renderSoxlDeep85Light() {
+      const el = document.getElementById("soxlDeep85Light");
+      const m = LIVE_MARKET;
+      if (!el || !m || !m.soxl_gap_tracker) {
+        if (el) el.style.display = "none";
+        return;
+      }
+      const t = m.soxl_gap_tracker;
+      const lampCls = !t.is_armed ? "off" : (t.stage_code === "TRIGGERED" ? "on" : "warn");
+
+      const col1 = `
+        <div class="d85-card">
+          <div class="d85-card-h">
+            <span>周线亮灯状态（每周五收盘结算）</span>
+            <span>基准周: ${t.w_date}</span>
+          </div>
+          <div class="d85-item ${t.pre_c7_vol ? "ok" : "miss"}">
+            <div class="d85-item-top">
+              <span>1. 前置大底 pre_c7_vol</span>
+              <span>${t.pre_c7_vol ? "✓ 满足" : "○ 未满足"}</span>
+            </div>
+            <div class="d85-item-val">200W=${fmtV(t.min8w_low_200w, "x")} | 4W_WF=${fmtV(t.min4w_wf)} | 量比=${fmtV(t.max4w_vol_r, "x")}</div>
+          </div>
+          <div class="d85-item ${t.dd52_ok ? "ok" : "miss"}">
+            <div class="d85-item-top">
+              <span>2. 极深回撤: 周收盘较52W高 ≤ -85%</span>
+              <span>${t.dd52_ok ? "✓ 满足" : "○ 未满足"}</span>
+            </div>
+            <div class="d85-item-val">当前周收盘较52W高 ${fmtV(t.dd52_pct, "%", 1)}</div>
+          </div>
+          <div class="d85-item ${t.is_armed ? "ok" : "miss"}">
+            <div class="d85-item-top">
+              <span>锚点周五收盘价</span>
+              <span>${t.is_armed ? `$${fmtV(t.anchor_w_close)}` : "熄灭"}</span>
+            </div>
+            <div class="d85-item-val">${t.is_armed ? `亮灯起始 ${t.armed_start_date} (已亮 ${t.armed_weeks_count} 周) · 最低周五收 ${t.anchor_w_date}` : "亮灯后连续每周五满足均保持常亮"}</div>
+          </div>
+        </div>`;
+
+      const col2 = t.is_armed ? `
+        <div class="d85-card">
+          <div class="d85-card-h">
+            <span>明日 9:30 开盘判定线（零心算直接对照）</span>
+            <span>昨收 $${fmtV(t.last_close)}</span>
+          </div>
+          <div class="d85-item warn">
+            <div class="d85-item-top">
+              <span>明日生效买入门槛</span>
+              <span>两项须同时满足</span>
+            </div>
+            <div class="d85-bigpx">开盘价 ≤ $${fmtV(t.effective_open_max)}</div>
+            <div class="d85-item-val">① 跳空≤-8%: 昨收 $${fmtV(t.last_close)}×0.92 = <b>$${fmtV(t.gap8_trigger_px)}</b><br>② 防诱多护栏: 须 ≤ 亮灯周五收 <b>$${fmtV(t.anchor_w_close)}</b></div>
+          </div>
+          <div class="d85-note">
+            <b>一旦开盘触发（O ≤ $${fmtV(t.effective_open_max)}）：</b><br>
+            • <b>稳健买法</b>：开盘价 O 直接买（2022/2025/2026 全部命中）<br>
+            • <b>接针买法</b>：开盘后挂 <code>O×0.97 (-3%)</code> 或 <code>O×0.95 (-5%)</code>
+          </div>
+        </div>` : `
+        <div class="d85-card">
+          <div class="d85-card-h">
+            <span>明日 9:30 开盘判定线</span>
+            <span>昨收 $${fmtV(t.last_close)}</span>
+          </div>
+          <div class="d85-item miss">
+            <div class="d85-item-top"><span>Deep85 灯未亮</span><span>○ 锁定</span></div>
+            <div class="d85-bigpx off">灯未亮，明日开盘无需操作</div>
+            <div class="d85-item-val">仅当周五收盘同时满足 pre_c7_vol 且较52W高 ≤ -85% 时亮灯解锁。</div>
+          </div>
+        </div>`;
+
+      const trigHtml = t.latest_trigger ? `
+        <div class="d85-item ok">
+          <div class="d85-item-top">
+            <span>最新真破位跳空命中</span>
+            <span>${t.latest_trigger.date}</span>
+          </div>
+          <div class="d85-item-val">
+            开盘 <b>$${fmtV(t.latest_trigger.open)}</b> (跳空 ${fmtV(t.latest_trigger.gap_pct, "%", 1)} ≤ 锚 $${fmtV(t.latest_trigger.anchor)})<br>
+            盘中低 $${fmtV(t.latest_trigger.low)} | -3% $${fmtV(t.latest_trigger.dip3_px)} ${t.latest_trigger.dip3_hit ? "✓" : "✗"} / -5% $${fmtV(t.latest_trigger.dip5_px)} ${t.latest_trigger.dip5_hit ? "✓" : "✗"} | 收 $${fmtV(t.latest_trigger.close)}
+          </div>
+        </div>` : `
+        <div class="d85-item miss">
+          <div class="d85-item-top">
+            <span>本轮真破位跳空命中</span>
+            <span>${t.is_armed ? "等待中" : "未亮灯"}</span>
+          </div>
+          <div class="d85-item-val">亮灯后不限次日，只要后续任一交易日开盘同时满足跳空≤-8% 且 ≤ 锚点收盘价即触发。</div>
+        </div>`;
+
+      const col3 = `
+        <div class="d85-card">
+          <div class="d85-card-h">
+            <span>本轮触发摘要 & 熄灭规则</span>
+            <span>最新 ${t.last_date}</span>
+          </div>
+          ${trigHtml}
+          <div class="d85-note">
+            • <b>熄灭条件</b>：完成买入，或某周五收盘反弹回到 52W 高 -85% 以上。<br>
+            • <b>防踏空兜底</b>：上方原策略 <b>入口1 (F1)</b> 与 <b>入口3 (月线金叉)</b> 仍全程保留；未满仓时仍受 2 周 -25% 假底止损保护。
+          </div>
+        </div>`;
+
+      let tableHtml = "";
+      if (t.daily_rows && t.daily_rows.length > 0) {
+        tableHtml = `
+          <div class="d85-table-wrap">
+            <table class="d85-table">
+              <thead>
+                <tr>
+                  <th>日期</th><th>Open</th><th>相对昨收跳空</th><th>≤ 锚点($)</th><th>Low</th><th>开盘再跌</th><th>-3% / -5% 接针</th><th>Close</th><th>判定</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${t.daily_rows.map(r => {
+                  const badgeCls = r.status_code === "TRIGGERED" ? "d85-badge-trig" : (r.status_code === "BLOCKED_TRAP" ? "d85-badge-trap" : "d85-badge-wait");
+                  const dipNote = r.triggered
+                    ? `$${fmtV(r.dip3_px)}(${r.dip3_hit ? "✓" : "✗"}) / $${fmtV(r.dip5_px)}(${r.dip5_hit ? "✓" : "✗"})`
+                    : "—";
+                  return `<tr>
+                    <td>${r.date}</td>
+                    <td>$${fmtV(r.open)}</td>
+                    <td>${r.gap_pct >= 0 ? "+" : ""}${fmtV(r.gap_pct, "%", 1)}</td>
+                    <td>${r.below_anchor ? `✓ ≤$${fmtV(r.anchor)}` : `✗ >$${fmtV(r.anchor)}`}</td>
+                    <td>$${fmtV(r.low)}</td>
+                    <td>${fmtV(r.dip_open_pct, "%", 1)}</td>
+                    <td>${dipNote}</td>
+                    <td>$${fmtV(r.close)}</td>
+                    <td><span class="${badgeCls}">${r.status_text}</span></td>
+                  </tr>`;
+                }).join("")}
+              </tbody>
+            </table>
+          </div>`;
+      }
+
+      const histHtml = (t.history_episodes && t.history_episodes.length > 0)
+        ? `<div class="d85-hist"><span>历史 ${t.history_episodes.length} 次 Deep85 亮灯对照：</span>${t.history_episodes.map(h =>
+            `<span><b>${h.armed_date}</b> (锚$${fmtV(h.anchor_close)}) → ${h.first_trigger_date ? `${h.first_trigger_date} 开$${fmtV(h.trigger_open)} (${fmtV(h.trigger_gap_pct, "%", 1)}, -3%${h.dip3_hit ? "✓" : "✗"}/-5%${h.dip5_hit ? "✓" : "✗"})` : "无真破位跳空"}</span>`
+          ).join("")}</div>`
+        : "";
+
+      el.innerHTML = `
+        <div class="d85-head">
+          <div class="d85-title-wrap">
+            <span class="d85-lamp ${lampCls}"></span>
+            <span class="d85-title">SOXL Deep85 亮灯 & 跳空接针监视器</span>
+            <span class="d85-sub">独立参考 · 不改变原有策略信号</span>
+          </div>
+          <span class="d85-stage ${t.stage_tone}">${t.stage_label}</span>
+        </div>
+        <div class="d85-cols">${col1}${col2}${col3}</div>
+        ${tableHtml}
+        ${histHtml}
+      `;
+    }"""
+
+    render_anchor = "\n\n    render();\n  </script>"
+    assert render_anchor in html, "Missing top-level render() anchor"
+    html = html.replace(render_anchor, f"\n{d85_js}\n\n    render();\n    renderSoxlDeep85Light();\n  </script>", 1)
+
     OUTPUT_HTML.write_text(html, encoding="utf-8")
     print(f"Generated {OUTPUT_HTML} ({len(monthly)} monthly bars)")
 

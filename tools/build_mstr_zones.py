@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from indicators import historical_volatility, sma
-from tools.build_btc_zones import _ds_du, _pine_gaussian_filter, build_halving_zone_shapes
+from tools.build_btc_zones import HALVINGS, _ds_du, _pine_gaussian_filter, build_halving_zone_shapes
 from tools.build_soxl_zones import (
     DATA_DIR,
     FEE_RATE,
@@ -106,6 +106,290 @@ def prepare_mstr_btc_df() -> tuple[pd.DataFrame, pd.DataFrame]:
     merged["m_vol_r20"] = merged["Volume"] / merged["Volume"].rolling(20).mean()
     merged["m_vol_r20_max3"] = merged["m_vol_r20"].rolling(3).max()
     return df_mstr, merged
+
+
+def _safe_float(val: object, digits: int = 2) -> float | None:
+    if val is None or pd.isna(val):
+        return None
+    f = float(val)
+    if np.isnan(f) or np.isinf(f):
+        return None
+    return round(f, digits)
+
+
+def build_mstr_t0_tracker(merged: pd.DataFrame) -> dict:
+    """Compute strictly causal MSTR T0 panic-bottom tracker inside the BTC halving buy window."""
+    d = merged.copy().sort_values("Date").reset_index(drop=True)
+    d["m_hv60"] = historical_volatility(d["Close"], period=60, annualization_factor=252)
+    d["m_hvr"] = d["m_hv20"] / d["m_hv60"]
+    d["dd60_pct"] = (d["Close"] / d["High"].rolling(60).max() - 1.0) * 100.0
+    d["low20"] = d["Low"].rolling(20).min()
+    d["cond_dd"] = d["dd60_pct"] <= -35.0
+    d["cond_low20"] = d["Low"] <= d["low20"] * 1.02
+    d["cond_pulse"] = (
+        (d["b_hvr"] >= 1.25)
+        | (d["m_hvr"] >= 1.25)
+        | ((d["m_vol_r20"] >= 1.50) & (d["mstr_btc_r60"] <= 0.85))
+    )
+    d["is_t0_bar"] = d["cond_dd"] & d["cond_low20"] & d["cond_pulse"]
+
+    last_row = d.iloc[-1]
+    last_dt = pd.Timestamp(last_row["Date"])
+    next_h = min((h for h in HALVINGS if h > last_dt), default=HALVINGS[-1])
+    ds, du = _ds_du(last_dt)
+
+    win_start = next_h - pd.Timedelta(days=540)
+    win_end = next_h - pd.Timedelta(days=460)
+    h490_date = next_h - pd.Timedelta(days=490)
+    pre_start = next_h - pd.Timedelta(days=800)
+    pre_end = next_h - pd.Timedelta(days=541)
+    in_buy_zone = bool(460 <= du <= 540)
+
+    pre = d[(d["Date"] >= pre_start) & (d["Date"] <= pre_end)]
+    if not pre.empty:
+        pre_idx = pre["Low"].idxmin()
+        pre_low = _safe_float(pre.loc[pre_idx, "Low"], 2)
+        pre_low_date = pd.Timestamp(pre.loc[pre_idx, "Date"]).strftime("%Y-%m-%d")
+    else:
+        pre_low = None
+        pre_low_date = None
+
+    win = d[(d["Date"] >= win_start) & (d["Date"] <= win_end)].reset_index(drop=True)
+    t0_rows = win[win["is_t0_bar"]]
+    t0_triggered = not t0_rows.empty
+
+    t0_date = None
+    t0_close = None
+    t0_low = None
+    t0_dd60_pct = None
+    t0_b_hvr = None
+    t0_m_hvr = None
+    t0_vol_r20 = None
+    t0_r60 = None
+    days_since_t0 = 0
+    win_low = None
+    win_low_date = None
+    drop_from_t0_pct = None
+    vs_pre_low_pct = None
+    run_low = None
+    run_low_date = None
+    streak = 0
+    first_5d_date = None
+    first_5d_px = None
+    daily_rows: list[dict] = []
+    limit_tiers: list[dict] = []
+
+    if t0_triggered:
+        t0_first_idx = int(t0_rows.index[0])
+        r0 = win.loc[t0_first_idx]
+        t0_ts = pd.Timestamp(r0["Date"])
+        t0_date = t0_ts.strftime("%Y-%m-%d")
+        t0_close = _safe_float(r0["Close"], 2)
+        t0_low = _safe_float(r0["Low"], 2)
+        t0_dd60_pct = _safe_float(r0["dd60_pct"], 1)
+        t0_b_hvr = _safe_float(r0["b_hvr"], 2)
+        t0_m_hvr = _safe_float(r0["m_hvr"], 2)
+        t0_vol_r20 = _safe_float(r0["m_vol_r20"], 2)
+        t0_r60 = _safe_float(r0["mstr_btc_r60"], 2)
+
+        post = win.loc[t0_first_idx:].reset_index(drop=True)
+        days_since_t0 = len(post) - 1
+        wl_idx = post["Low"].idxmin()
+        win_low = _safe_float(post.loc[wl_idx, "Low"], 2)
+        win_low_date = pd.Timestamp(post.loc[wl_idx, "Date"]).strftime("%Y-%m-%d")
+        if win_low is not None and t0_close:
+            drop_from_t0_pct = round((win_low / t0_close - 1.0) * 100.0, 1)
+        if win_low is not None and pre_low:
+            vs_pre_low_pct = round((win_low / pre_low - 1.0) * 100.0, 1)
+
+        run_low = float(post.loc[0, "Low"])
+        run_low_date = pd.Timestamp(post.loc[0, "Date"]).strftime("%Y-%m-%d")
+        streak = 0
+        all_post_rows: list[dict] = []
+        for idx_p in range(len(post)):
+            rp = post.loc[idx_p]
+            dt_p = pd.Timestamp(rp["Date"]).strftime("%Y-%m-%d")
+            low_p = float(rp["Low"])
+            if idx_p == 0:
+                is_new_low = True
+                cur_streak = 0
+            elif low_p < run_low:
+                run_low = low_p
+                run_low_date = dt_p
+                streak = 0
+                is_new_low = True
+                cur_streak = 0
+            else:
+                streak += 1
+                is_new_low = False
+                cur_streak = streak
+
+            if cur_streak == 5 and first_5d_date is None:
+                if idx_p + 1 < len(post):
+                    nxt_rp = post.loc[idx_p + 1]
+                    first_5d_date = pd.Timestamp(nxt_rp["Date"]).strftime("%Y-%m-%d")
+                    first_5d_px = _safe_float(nxt_rp["Open"], 2)
+                else:
+                    first_5d_date = f"{dt_p} (明日开盘)"
+                    first_5d_px = None
+
+            c_p = float(rp["Close"])
+            vs_t0 = ((c_p / t0_close) - 1.0) * 100.0 if t0_close else None
+            all_post_rows.append({
+                "date": dt_p,
+                "open": _safe_float(rp["Open"], 2),
+                "low": _safe_float(low_p, 2),
+                "close": _safe_float(c_p, 2),
+                "vs_t0_pct": _safe_float(vs_t0, 1),
+                "r60": _safe_float(rp["mstr_btc_r60"], 2),
+                "b_hvr": _safe_float(rp["b_hvr"], 2),
+                "vol_r20": _safe_float(rp["m_vol_r20"], 2),
+                "is_new_low": is_new_low,
+                "streak": cur_streak,
+                "is_t0": idx_p == 0,
+            })
+
+        daily_rows = all_post_rows[-12:]
+        run_low = round(run_low, 2)
+
+        anchor_px = pre_low if pre_low is not None else t0_close
+        post_after = post.iloc[1:]
+        if anchor_px is not None:
+            for mult in (0.92, 0.86, 0.80, 0.74):
+                lim_px = round(anchor_px * mult, 2)
+                hit = post_after[post_after["Low"] <= lim_px]
+                if not hit.empty:
+                    hr = hit.iloc[0]
+                    fill_px = round(min(float(hr["Open"]), lim_px), 2)
+                    fill_dt = pd.Timestamp(hr["Date"]).strftime("%Y-%m-%d")
+                    limit_tiers.append({
+                        "mult_pct": int(round(mult * 100)),
+                        "weight_pct": 12.5,
+                        "limit_px": lim_px,
+                        "filled": True,
+                        "fill_date": fill_dt,
+                        "fill_px": fill_px,
+                    })
+                else:
+                    limit_tiers.append({
+                        "mult_pct": int(round(mult * 100)),
+                        "weight_pct": 12.5,
+                        "limit_px": lim_px,
+                        "filled": False,
+                        "fill_date": None,
+                        "fill_px": None,
+                    })
+
+    if du > 540:
+        stage_code = "OUT_OF_WINDOW"
+        stage_label = "未进买点窗 · 禁止抄底"
+        stage_tone = "muted"
+    elif in_buy_zone and not t0_triggered:
+        stage_code = "WAIT_T0"
+        stage_label = "窗内等待 T0 · 绝对不买"
+        stage_tone = "warn"
+    elif t0_triggered and streak < 5 and first_5d_date is None:
+        stage_code = "T0_ACTIVE"
+        stage_label = "T0 已亮灯 · 左侧接针 / 观察止跌"
+        stage_tone = "active"
+    elif t0_triggered and (streak >= 5 or first_5d_date is not None):
+        stage_code = "T0_STABILIZED"
+        stage_label = "右侧止跌确认 (连守前低 ≥ 5 交易日)"
+        stage_tone = "ready"
+    else:
+        stage_code = "POST_WINDOW"
+        stage_label = "已过本轮买点窗"
+        stage_tone = "muted"
+
+    history_windows: list[dict] = []
+    for h_dt in HALVINGS:
+        if h_dt < pd.Timestamp("2024-01-01"):
+            continue
+        hw_s = h_dt - pd.Timedelta(days=540)
+        hw_e = h_dt - pd.Timedelta(days=460)
+        if last_dt < hw_s:
+            continue
+        hp_s = h_dt - pd.Timedelta(days=800)
+        hp_e = h_dt - pd.Timedelta(days=541)
+        h_pre = d[(d["Date"] >= hp_s) & (d["Date"] <= hp_e)]
+        h_pre_low = _safe_float(h_pre["Low"].min(), 2) if not h_pre.empty else None
+        h_pre_dt = pd.Timestamp(h_pre.loc[h_pre["Low"].idxmin(), "Date"]).strftime("%Y-%m-%d") if not h_pre.empty else None
+
+        h_win = d[(d["Date"] >= hw_s) & (d["Date"] <= hw_e)].reset_index(drop=True)
+        h_t0s = h_win[h_win["is_t0_bar"]]
+        if h_t0s.empty:
+            continue
+        hi0 = int(h_t0s.index[0])
+        hr0 = h_win.loc[hi0]
+        h_t0_c = _safe_float(hr0["Close"], 2)
+        h_post = h_win.loc[hi0:].reset_index(drop=True)
+        h_wl_idx = h_post["Low"].idxmin()
+        h_wl = _safe_float(h_post.loc[h_wl_idx, "Low"], 2)
+        h_wl_dt = pd.Timestamp(h_post.loc[h_wl_idx, "Date"]).strftime("%Y-%m-%d")
+        h_d2l = int(h_wl_idx)
+        h_drop = round((h_wl / h_t0_c - 1.0) * 100.0, 1) if (h_wl is not None and h_t0_c) else None
+        history_windows.append({
+            "cycle": f"{h_dt.year} 减半周期",
+            "window": f"{hw_s.strftime('%Y-%m-%d')} ~ {hw_e.strftime('%Y-%m-%d')}",
+            "pre_low": h_pre_low,
+            "pre_low_date": h_pre_dt,
+            "t0_date": pd.Timestamp(hr0["Date"]).strftime("%Y-%m-%d"),
+            "t0_close": h_t0_c,
+            "win_low": h_wl,
+            "win_low_date": h_wl_dt,
+            "days_to_low": h_d2l,
+            "drop_from_t0_pct": h_drop,
+        })
+
+    return {
+        "cycle_halving_date": next_h.strftime("%Y-%m-%d"),
+        "win_start": win_start.strftime("%Y-%m-%d"),
+        "win_end": win_end.strftime("%Y-%m-%d"),
+        "h490_date": h490_date.strftime("%Y-%m-%d"),
+        "ds": int(ds),
+        "du": int(du),
+        "in_buy_zone": in_buy_zone,
+        "pre_low": pre_low,
+        "pre_low_date": pre_low_date,
+        "anchor_label": "进窗前熊市低点" if pre_low is not None else "T0 收盘价",
+        "stage_code": stage_code,
+        "stage_label": stage_label,
+        "stage_tone": stage_tone,
+        "t0_triggered": t0_triggered,
+        "t0_date": t0_date,
+        "t0_close": t0_close,
+        "t0_low": t0_low,
+        "t0_dd60_pct": t0_dd60_pct,
+        "t0_b_hvr": t0_b_hvr,
+        "t0_m_hvr": t0_m_hvr,
+        "t0_vol_r20": t0_vol_r20,
+        "t0_r60": t0_r60,
+        "days_since_t0": days_since_t0,
+        "win_low": win_low,
+        "win_low_date": win_low_date,
+        "drop_from_t0_pct": drop_from_t0_pct,
+        "vs_pre_low_pct": vs_pre_low_pct,
+        "run_low": run_low,
+        "run_low_date": run_low_date,
+        "no_new_low_streak": streak,
+        "first_5d_date": first_5d_date,
+        "first_5d_px": first_5d_px,
+        "limit_tiers": limit_tiers,
+        "daily_rows": daily_rows,
+        "history_windows": history_windows,
+        "last_date": last_dt.strftime("%Y-%m-%d"),
+        "last_close": _safe_float(last_row["Close"], 2),
+        "last_low": _safe_float(last_row["Low"], 2),
+        "last_dd60_pct": _safe_float(last_row["dd60_pct"], 1),
+        "last_low20": _safe_float(last_row["low20"], 2),
+        "last_cond_dd": bool(last_row["cond_dd"]),
+        "last_cond_low20": bool(last_row["cond_low20"]),
+        "last_cond_pulse": bool(last_row["cond_pulse"]),
+        "last_b_hvr": _safe_float(last_row["b_hvr"], 2),
+        "last_m_hvr": _safe_float(last_row["m_hvr"], 2),
+        "last_vol_r20": _safe_float(last_row["m_vol_r20"], 2),
+        "last_r60": _safe_float(last_row["mstr_btc_r60"], 2),
+    }
 
 
 def simulate_mstr_strategy(
@@ -430,6 +714,7 @@ def main() -> None:
         "in_buy_zone": bool((du <= 540) and (ds > 560)),
         "in_sell_zone": bool((ds >= 480) and (du > 540)),
     }
+    live_market["mstr_t0"] = build_mstr_t0_tracker(merged)
 
     halv_zones = [z for z in build_halving_zone_shapes() if z["end"] >= "2020-01-01"]
 
@@ -567,6 +852,237 @@ def main() -> None:
     i_r2 = html.index(radar_end, i_r1)
     html = html[:i_r1] + mstr_radar_js + html[i_r2:]
 
+    t0_css = """
+    .t0-tracker { margin: 12px 24px 0; background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 14px 16px; }
+    .t0-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; padding-bottom: 10px; border-bottom: 1px solid #21262d; }
+    .t0-title-wrap { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .t0-title { font-size: 14px; font-weight: 700; color: #f0f6fc; }
+    .t0-sub { font-size: 11px; color: #8b949e; background: #0d1117; border: 1px solid #30363d; border-radius: 999px; padding: 2px 8px; }
+    .t0-stage { font-size: 12px; font-weight: 600; border-radius: 6px; padding: 4px 10px; }
+    .t0-stage.muted { background: #21262d; color: #8b949e; border: 1px solid #30363d; }
+    .t0-stage.warn { background: rgba(240,136,62,0.14); color: #f0883e; border: 1px solid rgba(240,136,62,0.4); }
+    .t0-stage.active { background: rgba(88,166,255,0.14); color: #58a6ff; border: 1px solid rgba(88,166,255,0.45); }
+    .t0-stage.ready { background: rgba(63,185,80,0.16); color: #3fb950; border: 1px solid rgba(63,185,80,0.45); }
+    .t0-meta { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: #8b949e; margin-top: 8px; }
+    .t0-meta b { color: #e6edf3; }
+    .t0-cols { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+    @media (max-width: 980px) { .t0-cols { grid-template-columns: 1fr; } }
+    .t0-card { background: #0d1117; border: 1px solid #21262d; border-radius: 8px; padding: 11px 12px; }
+    .t0-card-h { font-size: 12px; font-weight: 600; color: #c9d1d9; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
+    .t0-item { font-size: 12px; padding: 6px 8px; border-radius: 6px; margin-bottom: 6px; border: 1px solid #21262d; background: #161b22; }
+    .t0-item.ok { border-color: rgba(63,185,80,0.4); background: rgba(63,185,80,0.08); }
+    .t0-item.miss { border-color: #21262d; color: #8b949e; }
+    .t0-item-top { display: flex; justify-content: space-between; gap: 6px; font-weight: 600; }
+    .t0-item.ok .t0-item-top { color: #3fb950; }
+    .t0-item-val { font-size: 11px; color: #8b949e; margin-top: 2px; }
+    .t0-tiers { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+    .t0-tier { padding: 7px 8px; border-radius: 6px; border: 1px solid #30363d; background: #161b22; font-size: 12px; }
+    .t0-tier.ok { border-color: rgba(63,185,80,0.45); background: rgba(63,185,80,0.10); }
+    .t0-tier-px { font-weight: 700; color: #f0f6fc; font-size: 13px; }
+    .t0-tier.ok .t0-tier-px { color: #3fb950; }
+    .t0-tier-st { font-size: 11px; color: #8b949e; margin-top: 2px; }
+    .t0-note { font-size: 11px; color: #8b949e; margin-top: 8px; line-height: 1.45; }
+    .t0-prog-wrap { background: #161b22; border: 1px solid #30363d; border-radius: 999px; height: 10px; overflow: hidden; margin: 6px 0; }
+    .t0-prog-bar { height: 100%; background: linear-gradient(90deg, #58a6ff, #3fb950); transition: width 0.25s; }
+    .t0-table-wrap { margin-top: 12px; overflow-x: auto; border: 1px solid #21262d; border-radius: 8px; }
+    .t0-table { width: 100%; border-collapse: collapse; font-size: 12px; background: #0d1117; }
+    .t0-table th, .t0-table td { padding: 6px 8px; text-align: right; border-bottom: 1px solid #21262d; white-space: nowrap; }
+    .t0-table th:first-child, .t0-table td:first-child, .t0-table th:last-child, .t0-table td:last-child { text-align: left; }
+    .t0-table th { color: #8b949e; font-weight: 600; background: #161b22; }
+    .t0-badge-newlow { color: #ff7b72; font-weight: 600; }
+    .t0-badge-hold { color: #3fb950; font-weight: 600; }
+    .t0-badge-t0 { color: #58a6ff; font-weight: 700; }
+    .t0-hist { margin-top: 8px; font-size: 11px; color: #8b949e; display: flex; flex-wrap: wrap; gap: 14px; }
+    .t0-hist b { color: #c9d1d9; }
+  </style>"""
+    assert "</style>" in html, "Missing </style> anchor"
+    html = html.replace("</style>", t0_css, 1)
+
+    cockpit_div = '<div id="liveCockpit" class="live-cockpit"></div>'
+    assert cockpit_div in html, "Missing liveCockpit anchor"
+    html = html.replace(cockpit_div, cockpit_div + '\n\n  <div id="t0Tracker" class="t0-tracker"></div>', 1)
+
+    t0_render_js = """
+    function renderT0Tracker() {
+      const el = document.getElementById("t0Tracker");
+      const m = LIVE_MARKET;
+      if (!el || !m || !m.mstr_t0) {
+        if (el) el.style.display = "none";
+        return;
+      }
+      const t = m.mstr_t0;
+      const anchorPx = t.pre_low !== null ? t.pre_low : t.t0_close;
+      const conds = [
+        {
+          label: "1. 深跌门槛: 60日回撤 ≤ -35%",
+          ok: t.t0_triggered ? true : Boolean(t.last_cond_dd),
+          val: t.t0_triggered
+            ? `T0日 ${fmtV(t.t0_dd60_pct, "%", 1)} | 最新 ${fmtV(t.last_dd60_pct, "%", 1)}`
+            : `最新 60日回撤 ${fmtV(t.last_dd60_pct, "%", 1)}`,
+        },
+        {
+          label: "2. 破位插针: 触及近20日新低",
+          ok: t.t0_triggered ? true : Boolean(t.last_cond_low20),
+          val: t.t0_triggered
+            ? `T0日低 $${fmtV(t.t0_low)} | 最新低 $${fmtV(t.last_low)} (20D低 $${fmtV(t.last_low20)})`
+            : `最新低 $${fmtV(t.last_low)} vs 20D低 $${fmtV(t.last_low20)}`,
+        },
+        {
+          label: "3. 恐慌/放量脉冲 (HVR≥1.25 或 量≥1.5x且R60≤0.85)",
+          ok: t.t0_triggered ? true : Boolean(t.last_cond_pulse),
+          val: t.t0_triggered
+            ? `T0日 BTC_HVR=${fmtV(t.t0_b_hvr)} M_HVR=${fmtV(t.t0_m_hvr)} 量=${fmtV(t.t0_vol_r20, "x")} R60=${fmtV(t.t0_r60, "x")}`
+            : `最新 BTC_HVR=${fmtV(t.last_b_hvr)} | M_HVR=${fmtV(t.last_m_hvr)} | 量=${fmtV(t.last_vol_r20, "x")} | R60=${fmtV(t.last_r60, "x")}`,
+        },
+      ];
+
+      const col1 = `
+        <div class="t0-card">
+          <div class="t0-card-h">
+            <span>T0 三条件门控（未亮灯绝对不买）</span>
+            <span>${t.t0_triggered ? `✓ ${t.t0_date}` : "等待中"}</span>
+          </div>
+          ${conds.map(c => `
+            <div class="t0-item ${c.ok ? "ok" : "miss"}">
+              <div class="t0-item-top">
+                <span>${c.label}</span>
+                <span>${c.ok ? "✓ 满足" : "○ 未满足"}</span>
+              </div>
+              <div class="t0-item-val">${c.val}</div>
+            </div>
+          `).join("")}
+        </div>`;
+
+      let col2Body = "";
+      if (t.limit_tiers && t.limit_tiers.length > 0) {
+        col2Body = `<div class="t0-tiers">
+          ${t.limit_tiers.map(x => `
+            <div class="t0-tier ${x.filled ? "ok" : ""}">
+              <div class="t0-tier-px">${x.mult_pct}% 档 · $${fmtV(x.limit_px)} <span style="font-weight:400;font-size:11px;color:#8b949e">(${x.weight_pct}%)</span></div>
+              <div class="t0-tier-st">${x.filled ? `✓ ${x.fill_date.slice(5)} @ $${fmtV(x.fill_px)}` : "○ 待接针限价"}</div>
+            </div>
+          `).join("")}
+        </div>`;
+      } else {
+        const preview = anchorPx !== null
+          ? [0.92, 0.86, 0.80, 0.74].map(k => `$${fmtV(anchorPx * k)}`).join(" / ")
+          : "待进窗确认锚点";
+        col2Body = `<div class="t0-item miss">
+          <div class="t0-item-top"><span>限价网暂未激活（等 T0 亮灯）</span><span>○ 锁定</span></div>
+          <div class="t0-item-val">参考锚点下方 92/86/80/74%：${preview}</div>
+        </div>`;
+      }
+
+      const col2 = `
+        <div class="t0-card">
+          <div class="t0-card-h">
+            <span>左侧 50% 接针限价网</span>
+            <span>锚: $${fmtV(anchorPx)} (${t.anchor_label})</span>
+          </div>
+          ${col2Body}
+          <div class="t0-note">历史 11 次 MSTR 恐慌中 9 次 (82%) 于 T0 后 1–10 交易日内打出针尖；限价总仓封顶 50%，其余留给右侧兜底。</div>
+        </div>`;
+
+      const streak = t.no_new_low_streak || 0;
+      const pct = Math.min(100, Math.round((streak / 5) * 100));
+      const rightStatus = t.first_5d_date
+        ? `✓ 首次连续5日守稳触发：${t.first_5d_date}${t.first_5d_px !== null ? ` @ $${fmtV(t.first_5d_px)}` : ""}`
+        : (t.t0_triggered
+          ? `当前低点 $${fmtV(t.run_low)} (${t.run_low_date}) · 连守 ${streak} / 5 交易日`
+          : "T0 亮灯后自动开启 5 日不破新低计数");
+
+      const ml = m.mstr_live || {};
+      const col3 = `
+        <div class="t0-card">
+          <div class="t0-card-h">
+            <span>右侧 50% 止跌确认 & 兜底</span>
+            <span>${t.t0_triggered ? `T0 后 +${t.days_since_t0} 交易日` : "待启动"}</span>
+          </div>
+          <div class="t0-item ${t.first_5d_date ? "ok" : "miss"}">
+            <div class="t0-item-top">
+              <span>连续 5 个交易日不破前低</span>
+              <span>${streak}/5</span>
+            </div>
+            <div class="t0-prog-wrap"><div class="t0-prog-bar" style="width:${pct}%"></div></div>
+            <div class="t0-item-val">${rightStatus}</div>
+          </div>
+          <div class="t0-item ${(ml.btc_hvr < 1.0 && ml.btc_hvr_spike35) || t.du <= 490 ? "ok" : "miss"}">
+            <div class="t0-item-top">
+              <span>原策略兜底：BTC HVR < 1.0 或 H-490 (${t.h490_date})</span>
+              <span>H-${t.du}d</span>
+            </div>
+            <div class="t0-item-val">窗内最低: ${t.win_low !== null ? `$${fmtV(t.win_low)} (${t.win_low_date}, 距T0 ${fmtV(t.drop_from_t0_pct, "%", 1)})` : "—"} | BTC HVR=${fmtV(ml.btc_hvr)}</div>
+          </div>
+          <div class="t0-note">创新低计数自动归零；若为 11–12 月行情，须防范 12 月下旬税损抛售“二次插针”。</div>
+        </div>`;
+
+      let tableHtml = "";
+      if (t.daily_rows && t.daily_rows.length > 0) {
+        tableHtml = `
+          <div class="t0-table-wrap">
+            <table class="t0-table">
+              <thead>
+                <tr>
+                  <th>日期</th><th>Open</th><th>Low</th><th>Close</th><th>距T0收盘</th><th>r60</th><th>BTC HVR</th><th>量比</th><th>右侧状态</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${t.daily_rows.map(r => {
+                  const st = r.is_t0
+                    ? `<span class="t0-badge-t0">● T0 亮灯日</span>`
+                    : (r.is_new_low
+                      ? `<span class="t0-badge-newlow">★ 破前低 (重置 0/5)</span>`
+                      : `<span class="t0-badge-hold">守住前低 (${r.streak}/5)</span>`);
+                  return `<tr>
+                    <td>${r.date}</td>
+                    <td>$${fmtV(r.open)}</td>
+                    <td>$${fmtV(r.low)}</td>
+                    <td>$${fmtV(r.close)}</td>
+                    <td>${r.vs_t0_pct !== null ? `${r.vs_t0_pct >= 0 ? "+" : ""}${fmtV(r.vs_t0_pct, "%", 1)}` : "—"}</td>
+                    <td>${fmtV(r.r60, "x")}</td>
+                    <td>${fmtV(r.b_hvr)}</td>
+                    <td>${fmtV(r.vol_r20, "x")}</td>
+                    <td>${st}</td>
+                  </tr>`;
+                }).join("")}
+              </tbody>
+            </table>
+          </div>`;
+      }
+
+      const histHtml = (t.history_windows && t.history_windows.length > 0)
+        ? `<div class="t0-hist"><span>买点窗历史对照：</span>${t.history_windows.map(h =>
+            `<span><b>${h.cycle}</b>: 锚 $${fmtV(h.pre_low)} → T0 ${h.t0_date} ($${fmtV(h.t0_close)}) → 窗内低 $${fmtV(h.win_low)} (${h.win_low_date}, +${h.days_to_low}交易日, ${fmtV(h.drop_from_t0_pct, "%", 1)})</span>`
+          ).join("")}</div>`
+        : "";
+
+      el.innerHTML = `
+        <div class="t0-head">
+          <div class="t0-title-wrap">
+            <span class="t0-title">MSTR T0 恐慌洗盘与接货追踪器</span>
+            <span class="t0-sub">独立追踪 · 不改动上方原有策略买卖信号</span>
+          </div>
+          <span class="t0-stage ${t.stage_tone}">${t.stage_label}</span>
+        </div>
+        <div class="t0-meta">
+          <span>当前买点窗: <b>${t.win_start} ~ ${t.win_end}</b> (${t.in_buy_zone ? "窗内" : "窗外"} · H-${t.du}d)</span>
+          <span>窗前锚点低点: <b>${t.pre_low !== null ? `$${fmtV(t.pre_low)} (${t.pre_low_date})` : "—"}</b></span>
+          <span>T0 基准: <b>${t.t0_triggered ? `${t.t0_date} 收 $${fmtV(t.t0_close)}` : "尚未触发"}</b></span>
+          <span>窗内最低: <b>${t.win_low !== null ? `$${fmtV(t.win_low)} (${t.win_low_date}${t.vs_pre_low_pct !== null ? `, 较前低 ${fmtV(t.vs_pre_low_pct, "%", 1)}` : ""})` : "—"}</b></span>
+        </div>
+        <div class="t0-cols">${col1}${col2}${col3}</div>
+        ${tableHtml}
+        ${histHtml}
+      `;
+    }
+
+    render();
+    renderT0Tracker();"""
+
+    render_anchor = "\n\n    render();\n  </script>"
+    assert render_anchor in html, "Missing top-level render() anchor"
+    html = html.replace(render_anchor, f"\n{t0_render_js}\n  </script>", 1)
+
     OUTPUT_HTML.write_text(html, encoding="utf-8")
     print(f"Generated {OUTPUT_HTML} ({len(monthly)} monthly bars)")
 
@@ -595,6 +1111,16 @@ def format_mstr_tg_summary(live_market: dict, strategies: dict) -> str:
         f"策略 [Halv+mNAV]: {s1['badge']} ({s1['position_label']})",
         f"原因: {s1['reason']}",
     ]
+    t0 = live_market.get("mstr_t0")
+    if t0:
+        if t0.get("t0_triggered"):
+            lines.append(
+                f"T0追踪: 已亮灯({t0['t0_date']} ${t0['t0_close']}, +{t0['days_since_t0']}交易日) | 窗内低点 ${t0['win_low']} ({t0['drop_from_t0_pct']:+.1f}%) | 5日不破新低: {t0['no_new_low_streak']}/5"
+            )
+        else:
+            lines.append(
+                f"T0追踪: {t0['stage_label']} (60日回撤 {t0['last_dd60_pct']:+.1f}%, R60 {t0['last_r60']}x)"
+            )
     return "\n".join(lines)
 
 
