@@ -434,6 +434,7 @@ def render_dashboard(portal_data: dict) -> str:
       {{ id: "mstr_monthly_zones.html", label: "MSTR mNAV脉冲", dot: "#9A91FB" }},
       {{ id: "risk_radar.html", label: "风险雷达 (期权+新闻)", dot: "#FF5A79" }},
       {{ id: "panic_bottom_radar.html", label: "恐慌底部状态机", dot: "#14CA74" }},
+      {{ id: "chip_structure.html", label: "筹码结构 (获利盘)", dot: "#FDB52A" }},
       {{ id: "chart.html", label: "基础K线对比 (chart)", dot: "#7E89AC" }},
     ];
 

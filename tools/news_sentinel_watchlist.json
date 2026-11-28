@@ -1,0 +1,34 @@
+{
+  "updated_at": "2026-11-28",
+  "description": "Top 20 Nasdaq-listed (NMS) companies by live market cap (including SPCX #6) + MSTR",
+  "companies": [
+    {"rank": 1, "ticker": "AAPL", "name": "Apple", "keywords": ["Apple", "AAPL", "iPhone", "Tim Cook"]},
+    {"rank": 2, "ticker": "MSFT", "name": "Microsoft", "keywords": ["Microsoft", "MSFT", "Azure", "OpenAI", "Satya Nadella"]},
+    {"rank": 3, "ticker": "NVDA", "name": "NVIDIA", "keywords": ["NVIDIA", "NVDA", "Jensen Huang", "Blackwell", "Rubin", "CUDA"]},
+    {"rank": 4, "ticker": "GOOGL", "name": "Alphabet", "keywords": ["Alphabet", "Google", "GOOGL", "Gemini", "Waymo", "Sundar Pichai"]},
+    {"rank": 5, "ticker": "AMZN", "name": "Amazon", "keywords": ["Amazon", "AMZN", "AWS", "Andy Jassy"]},
+    {"rank": 6, "ticker": "SPCX", "name": "SpaceX", "keywords": ["SpaceX", "SPCX", "Starlink", "Starship", "Elon Musk", "lock-up", "lockup"]},
+    {"rank": 7, "ticker": "META", "name": "Meta Platforms", "keywords": ["Meta", "META", "Mark Zuckerberg", "Llama", "Instagram", "WhatsApp"]},
+    {"rank": 8, "ticker": "TSLA", "name": "Tesla", "keywords": ["Tesla", "TSLA", "Elon Musk", "Robotaxi", "FSD", "Optimus"]},
+    {"rank": 9, "ticker": "AVGO", "name": "Broadcom", "keywords": ["Broadcom", "AVGO", "Hock Tan", "ASIC", "XPU"]},
+    {"rank": 10, "ticker": "WMT", "name": "Walmart", "keywords": ["Walmart", "WMT"]},
+    {"rank": 11, "ticker": "MU", "name": "Micron Technology", "keywords": ["Micron", "MU", "HBM", "DRAM", "NAND"]},
+    {"rank": 12, "ticker": "AMD", "name": "AMD", "keywords": ["AMD", "Lisa Su", "Instinct", "MI350", "MI400"]},
+    {"rank": 13, "ticker": "ASML", "name": "ASML Holding", "keywords": ["ASML", "EUV", "High-NA", "lithography"]},
+    {"rank": 14, "ticker": "COST", "name": "Costco", "keywords": ["Costco", "COST"]},
+    {"rank": 15, "ticker": "PLTR", "name": "Palantir", "keywords": ["Palantir", "PLTR", "Alex Karp", "AIP"]},
+    {"rank": 16, "ticker": "CSCO", "name": "Cisco", "keywords": ["Cisco", "CSCO"]},
+    {"rank": 17, "ticker": "INTC", "name": "Intel", "keywords": ["Intel", "INTC", "Foundry", "18A", "14A"]},
+    {"rank": 18, "ticker": "PANW", "name": "Palo Alto Networks", "keywords": ["Palo Alto Networks", "PANW"]},
+    {"rank": 19, "ticker": "TXN", "name": "Texas Instruments", "keywords": ["Texas Instruments", "TXN"]},
+    {"rank": 20, "ticker": "AMAT", "name": "Applied Materials", "keywords": ["Applied Materials", "AMAT"]},
+    {"rank": 21, "ticker": "MSTR", "name": "Strategy (MicroStrategy)", "keywords": ["Strategy", "MicroStrategy", "MSTR", "Michael Saylor", "Bitcoin", "ATM offering", "mNAV"]}
+  ],
+  "google_news_batches": [
+    {"label": "SPCX_MSTR_Focus", "query": "(SpaceX OR SPCX OR Starlink OR \"MicroStrategy\" OR \"Strategy\" MSTR OR \"Michael Saylor\") when:1d"},
+    {"label": "Semis_Core", "query": "(NVDA OR NVIDIA OR AVGO OR Broadcom OR MU OR Micron OR AMD OR ASML OR INTC OR Intel OR TXN OR AMAT) (earnings OR guidance OR export OR ban OR acquisition OR deal OR launch OR SEC) when:1d"},
+    {"label": "MegaCap_Tech", "query": "(AAPL OR Apple OR MSFT OR Microsoft OR GOOGL OR Alphabet OR AMZN OR Amazon OR META OR TSLA OR Tesla) (earnings OR guidance OR antitrust OR SEC OR acquisition OR DOJ OR EU OR recall OR tariff) when:1d"},
+    {"label": "Nasdaq_Top20_Rest", "query": "(WMT OR Walmart OR COST OR Costco OR PLTR OR Palantir OR CSCO OR Cisco OR PANW OR \"Palo Alto Networks\") (earnings OR guidance OR contract OR acquisition OR SEC) when:1d"},
+    {"label": "X_Public_Signals", "query": "site:x.com (SpaceX OR SPCX OR NVDA OR MSTR OR Saylor OR TSLA OR AAPL OR MSFT OR AMD OR ASML) when:1d"}
+  ]
+}
